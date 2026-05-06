@@ -1,0 +1,4 @@
+interface:
+  display_name: "ShellySmartEnergy Django Developer"
+  short_description: "Django guidance for ShellySmartEnergy"
+  default_prompt: "Use $shellysmartenergy-django-developer to change or review the ShellySmartEnergy Django app while following its local structure and runtime conventions."
