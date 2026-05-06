@@ -47,6 +47,11 @@ class ShellyDevice(models.Model):
         default=0, help_text="Set how many hours the device should run daily (0-24)"
     )
 
+    minimum_run_hours_per_day = models.IntegerField(
+        default=0,
+        help_text="Minimum hours to keep assigned from the cheapest periods (0-24)",
+    )
+
     # New fields for transfer prices
     day_transfer_price = models.DecimalField(
         max_digits=6,
