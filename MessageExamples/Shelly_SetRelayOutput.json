@@ -1,0 +1,20 @@
+{
+  "destination": "Shelly Cloud",
+  "operation": "Set relay output",
+  "request": {
+    "method": "POST",
+    "url": "https://shelly-api.example.com/device/relay/control",
+    "query": {
+      "id": "shelly-device-id",
+      "auth_key": "replace-with-shelly-auth-key"
+    },
+    "form_data": {
+      "turn": "on",
+      "channel": 0
+    },
+    "timeout_seconds": 15
+  },
+  "response": {
+    "isok": true
+  }
+}
