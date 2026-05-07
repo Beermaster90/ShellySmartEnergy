@@ -8,7 +8,7 @@
 ## Quick Install (One Command)
 Run this from any Linux host to install prerequisites and set up the project in the current directory:
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Beermaster90/ShellySmartEnergy/main/Initial_ShellySmartEnergy_Setup.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Beermaster90/ShellySmartEnergy/refs/heads/master/Initial_ShellySmartEnergy_Setup.sh)"
 ```
 
 ## 1. Create a Python Virtual Environment (venv)
