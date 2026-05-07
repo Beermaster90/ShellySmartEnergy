@@ -1,0 +1,24 @@
+{
+  "destination": "Shelly Cloud",
+  "operation": "Get temperature device status",
+  "request": {
+    "method": "GET",
+    "url": "https://shelly-api.example.com/device/status",
+    "query": {
+      "id": "shelly-temperature-device-id",
+      "auth_key": "replace-with-shelly-auth-key"
+    },
+    "timeout_seconds": 15
+  },
+  "response": {
+    "isok": true,
+    "data": {
+      "online": true,
+      "device_status": {
+        "temperature:0": {
+          "tC": 21.5
+        }
+      }
+    }
+  }
+}
