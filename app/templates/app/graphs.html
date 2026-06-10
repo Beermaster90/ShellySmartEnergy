@@ -111,7 +111,10 @@
                 <h3 class="panel-title">Total Cost Comparison Over Time (incl. VAT + Transfer Costs)</h3>
             </div>
             <div class="panel-body">
-                <canvas id="costChart" width="800" height="400"></canvas>
+                <div id="costChartLoading" class="text-center text-muted" style="padding: 40px 0;">
+                    <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading chart data…
+                </div>
+                <canvas id="costChart" width="800" height="400" style="display:none;"></canvas>
             </div>
         </div>
     </div>
@@ -140,7 +143,10 @@
                         <h3 class="panel-title">Last 15 Days</h3>
                     </div>
                     <div class="panel-body">
-                        <canvas id="temperatureChart" height="300"></canvas>
+                        <div id="tempChartLoading" class="text-center text-muted" style="padding: 30px 0;">
+                            <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading…
+                        </div>
+                        <canvas id="temperatureChart" height="300" style="display:none;"></canvas>
                     </div>
                 </div>
 
@@ -149,9 +155,42 @@
                         <h3 class="panel-title">Yearly Overview</h3>
                     </div>
                     <div class="panel-body">
-                        <canvas id="temperatureYearChart" height="300"></canvas>
+                        <div id="tempYearChartLoading" class="text-center text-muted" style="padding: 30px 0;">
+                            <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading…
+                        </div>
+                        <canvas id="temperatureYearChart" height="300" style="display:none;"></canvas>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row" style="margin-top: 30px;">
+    <div class="col-md-12">
+        <div class="panel panel-success">
+            <div class="panel-heading">
+                <h3 class="panel-title">Device Run History — Past 7 Days</h3>
+            </div>
+            <div class="panel-body">
+                {% if shelly_devices %}
+                <div class="form-group">
+                    <label for="runHistoryDeviceSelect">Select Device:</label>
+                    <select id="runHistoryDeviceSelect" class="form-control" style="max-width: 400px;" onchange="updateRunHistoryDeviceSelection()">
+                        {% for device in shelly_devices %}
+                            <option value="{{ device.device_id }}" {% if selected_run_history_device and device.device_id == selected_run_history_device.device_id %}selected{% endif %}>
+                                {{ device.familiar_name }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div id="runHistoryLoading" class="text-center text-muted" style="padding: 30px 0;">
+                    <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading…
+                </div>
+                <div id="runHistoryCalendar"></div>
+                {% else %}
+                <p class="text-muted">No devices configured.</p>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -165,9 +204,6 @@
 
 <script>
     let chart = null;
-    let graphData = {{ graph_data|safe }};
-    let temperatureGraphData = {{ temperature_graph_data|safe }};
-    let temperatureYearGraphData = {{ temperature_year_graph_data|safe }};
 
     function calculateWatts() {
         const yearlyConsumption = parseFloat(document.getElementById('yearlyConsumption').value) || 0;
@@ -194,21 +230,75 @@
         window.location.href = currentUrl.toString();
     }
 
+    function updateRunHistoryDeviceSelection() {
+        const sel = document.getElementById('runHistoryDeviceSelect');
+        const currentUrl = new URL(window.location.href);
+        if (sel && sel.value) {
+            currentUrl.searchParams.set('run_history_device_id', sel.value);
+        } else {
+            currentUrl.searchParams.delete('run_history_device_id');
+        }
+        window.location.href = currentUrl.toString();
+    }
+
+    function renderRunHistoryCalendar(data) {
+        const container = document.getElementById('runHistoryCalendar');
+        if (!container) return;
+        if (!data || !data.days || data.days.length === 0) {
+            container.innerHTML = '<p class="text-muted">No assignment data for the past 7 days.</p>';
+            return;
+        }
+
+        let html = '<div class="rh-container">';
+
+        // Hour header row
+        html += '<div class="rh-row">';
+        html += '<div class="rh-label"></div>';
+        html += '<div class="rh-slots rh-header">';
+        for (let h = 0; h < 24; h++) {
+            html += `<div class="rh-hour-cell"><span>${String(h).padStart(2, '0')}</span></div>`;
+        }
+        html += '</div></div>';
+
+        // Day rows
+        for (const day of data.days) {
+            html += '<div class="rh-row">';
+            html += `<div class="rh-label">${day.label}</div>`;
+            html += '<div class="rh-slots">';
+            for (let h = 0; h < 24; h++) {
+                html += '<div class="rh-hour-cell">';
+                for (let q = 0; q < 4; q++) {
+                    const slot = h * 4 + q;
+                    const running = day.slots[slot];
+                    const time = `${String(h).padStart(2,'0')}:${String(q * 15).padStart(2,'0')}`;
+                    html += `<div class="rh-slot${running ? ' rh-on' : ''}" title="${day.label} ${time}"></div>`;
+                }
+                html += '</div>';
+            }
+            html += '</div></div>';
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
+    }
+
     function updateChart(data) {
         console.log('updateChart called with:', data);
-        
+
         const canvas = document.getElementById('costChart');
         if (!canvas) {
             console.error('Canvas element not found');
             return;
         }
-        
+        canvas.style.display = '';
+        document.getElementById('costChartLoading').style.display = 'none';
+
         const ctx = canvas.getContext('2d');
         if (!ctx) {
             console.error('Could not get canvas context');
             return;
         }
-        
+
         // Destroy existing chart if it exists
         if (chart) {
             chart.destroy();
@@ -349,7 +439,7 @@
     let tempChart = null;
     let tempYearChart = null;
 
-    function updateTemperatureCharts() {
+    function updateTemperatureCharts(temperatureGraphData, temperatureYearGraphData) {
         const tempCanvas = document.getElementById('temperatureChart');
         if (!tempCanvas) {
             return;
@@ -426,20 +516,66 @@
         });
     }
 
-    // Initialize chart on page load
+    // Build current URL params for AJAX calls (preserves user_id, device selections, etc.)
+    function buildAjaxParams(extra) {
+        const params = new URLSearchParams(window.location.search);
+        if (extra) Object.entries(extra).forEach(([k, v]) => params.set(k, v));
+        return params.toString();
+    }
+
+    // Initialize charts on page load — fetch all data asynchronously
     document.addEventListener('DOMContentLoaded', function() {
-        // Calculate initial watts value from yearly consumption
         calculateWatts();
-        
-        if (graphData && graphData.labels && graphData.labels.length > 0) {
-            updateChart(graphData);
-        } else {
-            // Show a message to the user
-            const ctx = document.querySelector('#costChart').getContext('2d');
-            ctx.font = "16px Arial";
-            ctx.fillText("No data available. Please check if you have electricity price data in the database.", 10, 50);
-        }
-        updateTemperatureCharts();
+
+        // Cost comparison chart
+        const costParams = buildAjaxParams({
+            fixed_price: document.getElementById('fixedPrice') ? document.getElementById('fixedPrice').value : '{{ fixed_price }}',
+            yearly_consumption: document.getElementById('yearlyConsumption') ? document.getElementById('yearlyConsumption').value : '{{ yearly_consumption }}',
+            shelly_controlled_percentage: document.getElementById('shellyPercentage') ? document.getElementById('shellyPercentage').value : '{{ shelly_controlled_percentage }}',
+        });
+        fetch('/shellyapp/get-graph-data/?' + costParams)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('costChartLoading').style.display = 'none';
+                const canvas = document.getElementById('costChart');
+                canvas.style.display = '';
+                if (data.graph_data && data.graph_data.labels && data.graph_data.labels.length > 0) {
+                    updateChart(data.graph_data);
+                } else {
+                    const ctx = canvas.getContext('2d');
+                    ctx.font = "16px Arial";
+                    ctx.fillText("No data available.", 10, 50);
+                }
+            })
+            .catch(() => {
+                document.getElementById('costChartLoading').textContent = 'Failed to load chart data.';
+            });
+
+        // Temperature charts
+        fetch('/shellyapp/get-temperature-data/?' + buildAjaxParams())
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('tempChartLoading').style.display = 'none';
+                document.getElementById('tempYearChartLoading').style.display = 'none';
+                document.getElementById('temperatureChart').style.display = '';
+                document.getElementById('temperatureYearChart').style.display = '';
+                updateTemperatureCharts(data.temperature_graph_data, data.temperature_year_graph_data);
+            })
+            .catch(() => {
+                document.getElementById('tempChartLoading').textContent = 'Failed to load temperature data.';
+                document.getElementById('tempYearChartLoading').style.display = 'none';
+            });
+
+        // Run history calendar
+        fetch('/shellyapp/get-run-history-data/?' + buildAjaxParams())
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('runHistoryLoading').style.display = 'none';
+                renderRunHistoryCalendar(data.run_history_data);
+            })
+            .catch(() => {
+                document.getElementById('runHistoryLoading').textContent = 'Failed to load run history.';
+            });
     });
 
     // Handle form submission
@@ -519,6 +655,64 @@
 
     #costChart {
         height: 400px !important;
+    }
+
+    .rh-container {
+        overflow-x: auto;
+        font-size: 11px;
+    }
+    .rh-row {
+        display: flex;
+        align-items: stretch;
+        margin-bottom: 3px;
+    }
+    .rh-label {
+        width: 72px;
+        flex-shrink: 0;
+        text-align: right;
+        padding-right: 8px;
+        font-weight: 600;
+        color: #444;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        white-space: nowrap;
+    }
+    .rh-slots {
+        display: flex;
+        flex: 1;
+        min-width: 600px;
+        gap: 2px;
+    }
+    .rh-header .rh-hour-cell {
+        align-items: center;
+        justify-content: center;
+        color: #888;
+        font-weight: 500;
+        height: 16px;
+    }
+    .rh-hour-cell {
+        display: flex;
+        flex: 1;
+        gap: 1px;
+    }
+    .rh-hour-cell > span {
+        width: 100%;
+        text-align: center;
+    }
+    .rh-slot {
+        flex: 1;
+        height: 22px;
+        background-color: #e0e0e0;
+        border-radius: 2px;
+        cursor: default;
+        transition: opacity 0.1s;
+    }
+    .rh-slot.rh-on {
+        background-color: #28a745;
+    }
+    .rh-slot:hover {
+        opacity: 0.75;
     }
 </style>
 

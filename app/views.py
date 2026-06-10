@@ -137,17 +137,24 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
     )
     hours_needed = selected_device.run_hours_per_day if selected_device else 0
 
-    # Build a map of price_id -> list of assigned device_ids
+    # Build maps of price_id -> device_ids (active, forced_min, and removed_overheat)
     assigned_devices_map = {}
+    forced_devices_map = {}
+    removed_overheat_map = {}
     for assignment in assignments:
         price_id = assignment.electricity_price.id
-        device_id = assignment.device.device_id
-        if price_id not in assigned_devices_map:
-            assigned_devices_map[price_id] = []
-        assigned_devices_map[price_id].append(str(device_id))
+        device_id = str(assignment.device.device_id)
+        if assignment.assignment_type == "removed_overheat":
+            removed_overheat_map.setdefault(price_id, []).append(device_id)
+        else:
+            assigned_devices_map.setdefault(price_id, []).append(device_id)
+            if assignment.assignment_type == "forced_min":
+                forced_devices_map.setdefault(price_id, []).append(device_id)
 
     for price in prices:
         price["assigned_devices"] = ",".join(assigned_devices_map.get(price["id"], []))
+        price["forced_devices"] = ",".join(forced_devices_map.get(price["id"], []))
+        price["removed_overheat_devices"] = ",".join(removed_overheat_map.get(price["id"], []))
         # Convert UTC time to user's timezone for hour comparison
         price_user_tz = TimeUtils.to_user_timezone(price["start_time"], request.user)
         # Store both hour and 15-minute period information
@@ -190,33 +197,60 @@ def index(request: HttpRequest):
 
 @login_required
 def about(request: HttpRequest):
-    """Renders the about page with device logs in user's timezone."""
-    logs = (
-        DeviceLog.objects.all()
-        if request.user.is_superuser
-        else DeviceLog.objects.filter(device__user=request.user)
-    )
+    """Renders the logs page with device logs in user's timezone."""
+
+    # Admin user selection (same pattern as graphs page)
+    users = None
+    selected_user = request.user
+    if request.user.is_superuser:
+        users = User.objects.order_by("username")
+        selected_user_id = request.GET.get("user_id")
+        if selected_user_id:
+            selected_user = User.objects.filter(id=selected_user_id).first()
+        if not selected_user:
+            selected_user = users.first() or request.user
+
+    # Device selection
+    shelly_devices = ShellyDevice.objects.filter(user=selected_user).order_by("familiar_name")
+    selected_device_id = request.GET.get("device_id", "")
+
+    # Base queryset
+    if selected_device_id == "system":
+        # System logs have no device — only admins can view these
+        logs = DeviceLog.objects.filter(device__isnull=True)
+    elif selected_device_id:
+        logs = DeviceLog.objects.filter(device__device_id=selected_device_id, device__user=selected_user)
+    elif request.user.is_superuser and not request.GET.get("user_id"):
+        logs = DeviceLog.objects.all()
+    else:
+        logs = DeviceLog.objects.filter(device__user=selected_user)
+
+    # Status filter
     status_filter = request.GET.get("status", "")
     if status_filter:
         logs = logs.filter(status=status_filter)
-    logs = logs.order_by("-created_at")[:100]
 
-    # Convert log timestamps to user's timezone
+    logs = logs.select_related("device").order_by("-created_at")[:500]
+
     user_timezone_name = TimeUtils.get_user_timezone_name(request.user)
+    user_tz = TimeUtils.get_user_timezone(request.user)
     for log in logs:
-        log.created_at_user_tz = TimeUtils.format_datetime_with_tz(
-            log.created_at, request.user
-        )
+        local_dt = log.created_at.astimezone(user_tz)
+        log.created_at_local = local_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     return render(
         request,
         "app/about.html",
         {
             "title": "Logs",
-            "message": "SHOW ME THE LOGS",
             "year": datetime.now().year,
             "logs": logs,
             "user_timezone": user_timezone_name,
+            "users": users,
+            "selected_user": selected_user,
+            "shelly_devices": shelly_devices,
+            "selected_device_id": selected_device_id,
+            "status_filter": status_filter,
             "version": get_version_info(),
         },
     )
@@ -431,7 +465,8 @@ def toggle_device_assignment(request):
             DeviceAssignment.objects.create(
                 user=assignment_user,
                 device=device,
-                electricity_price=electricity_price
+                electricity_price=electricity_price,
+                assignment_type="manual",
             )
             action = "assigned"
             assigned = True

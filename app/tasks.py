@@ -205,11 +205,59 @@ class DeviceController:
     def _process_single_device(device: ShellyDevice, active_price_ids: list, start_time) -> None:
         """Process a single device - extracted for use in parallel processing."""
         try:
-            # Check if this 15-minute period is assigned
+            # Check if this 15-minute period is actively assigned (ignore removed_overheat)
             assigned = DeviceAssignment.objects.filter(
                 device=device,
-                electricity_price_id__in=active_price_ids
-            ).exists()
+                electricity_price_id__in=active_price_ids,
+            ).exclude(assignment_type="removed_overheat").exists()
+
+            # Thermostat temperature overrides
+            if device.thermostat_device_id:
+                thermostat = device.thermostat_device
+                if thermostat and thermostat.temperature_updated_at:
+                    now_utc = TimeUtils.now_utc()
+                    if (now_utc - thermostat.temperature_updated_at) <= timedelta(minutes=15):
+                        from decimal import Decimal
+                        min_trigger = thermostat.get_effective_min_temperature() - Decimal("0.5")
+                        max_trigger = thermostat.max_temperature + Decimal("0.5")
+
+                        if not assigned and thermostat.current_temperature < min_trigger:
+                            # Min temperature override: force ON regardless of price or schedule.
+                            # Also re-activates any period previously marked removed_overheat.
+                            price_obj = ElectricityPrice.objects.filter(id__in=active_price_ids).first()
+                            if price_obj:
+                                obj, created = DeviceAssignment.objects.get_or_create(
+                                    user=device.user,
+                                    device=device,
+                                    electricity_price=price_obj,
+                                    defaults={"assignment_type": "forced_min"},
+                                )
+                                if not created and obj.assignment_type == "removed_overheat":
+                                    obj.assignment_type = "forced_min"
+                                    obj.save(update_fields=["assignment_type"])
+                                assigned = True
+                                log_device_event(
+                                    device,
+                                    f"Thermostat below min ({thermostat.current_temperature} < {min_trigger}). "
+                                    f"Forcing ON for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
+                                    "INFO",
+                                )
+
+                        elif assigned and thermostat.current_temperature > max_trigger:
+                            # Max temperature override: soft-delete assignment (keep record as removed_overheat)
+                            DeviceAssignment.objects.filter(
+                                device=device,
+                                electricity_price_id__in=active_price_ids,
+                            ).exclude(assignment_type="removed_overheat").update(
+                                assignment_type="removed_overheat"
+                            )
+                            assigned = False
+                            log_device_event(
+                                device,
+                                f"Thermostat above max ({thermostat.current_temperature} > {max_trigger}). "
+                                f"Overriding assignment OFF for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
+                                "INFO",
+                            )
             
             # Get initial device state (ONLY ONE STATUS CHECK)
             shelly_service = ShellyService(device.device_id)

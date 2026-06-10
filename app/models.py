@@ -116,11 +116,19 @@ class ShellyTemperature(models.Model):
         default="https://yourapiaddress.shelly.cloud",
         help_text="Base URL of the Shelly server used for device communication",
     )
-    min_temperature = models.DecimalField(
+    min_temperature_winter = models.DecimalField(
         max_digits=5,
         decimal_places=2,
         default=0,
-        help_text="Minimum temperature threshold",
+        verbose_name="Min temperature (winter)",
+        help_text="Minimum temperature threshold Sep 1 – Mar 31 (winter season)",
+    )
+    min_temperature_summer = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        verbose_name="Min temperature (summer)",
+        help_text="Minimum temperature threshold Apr 1 – Aug 31 (summer season)",
     )
     max_temperature = models.DecimalField(
         max_digits=5,
@@ -146,6 +154,17 @@ class ShellyTemperature(models.Model):
         blank=True,
         help_text="Timestamp of the last temperature update",
     )
+
+    def get_effective_min_temperature(self):
+        """Return summer or winter min temperature based on the current date.
+        Summer: April 1 – August 31 (months 4–8).
+        Winter: September 1 – March 31 (months 9–3).
+        """
+        from app.utils.time_utils import TimeUtils
+        month = TimeUtils.now_utc().month
+        if 4 <= month <= 8:
+            return self.min_temperature_summer
+        return self.min_temperature_winter
 
     def __str__(self):
         return self.familiar_name
@@ -201,10 +220,24 @@ class DeviceLog(models.Model):
 
 
 class DeviceAssignment(models.Model):
+    ASSIGNMENT_TYPES = [
+        ("cheapest", "Cheapest Hours"),
+        ("threshold", "Price Threshold"),
+        ("forced_min", "Forced — Min Temperature"),
+        ("manual", "Manual"),
+        ("removed_overheat", "Removed — Overheating"),
+    ]
+
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     device = models.ForeignKey(ShellyDevice, on_delete=models.CASCADE)
     electricity_price = models.ForeignKey(ElectricityPrice, on_delete=models.CASCADE)
-    assigned_at = models.DateTimeField(auto_now_add=True)  # Timestamp of assignment
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    assignment_type = models.CharField(
+        max_length=20,
+        choices=ASSIGNMENT_TYPES,
+        default="cheapest",
+        help_text="Reason this period was assigned",
+    )
 
     def __str__(self):
         return f"{self.device.familiar_name} assigned at {self.electricity_price.start_time} by {self.user.username}"

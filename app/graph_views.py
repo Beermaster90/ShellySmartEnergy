@@ -16,10 +16,10 @@ def graphs(request: HttpRequest):
     """Renders the graphs page with cost comparison functionality."""
 
     # Default values
-    fixed_price = request.GET.get("fixed_price", "7.0")  # cents per kWh
-    yearly_consumption = request.GET.get("yearly_consumption", "10000")  # kWh per year
+    fixed_price = request.GET.get("fixed_price", "12.0")  # cents per kWh
+    yearly_consumption = request.GET.get("yearly_consumption", "13000")  # kWh per year
     shelly_controlled_percentage = request.GET.get("shelly_controlled_percentage", "30")  # % of usage controlled by Shelly (water heater + floor heating)
-    
+
     try:
         fixed_price = float(fixed_price)
         yearly_consumption = float(yearly_consumption)
@@ -27,8 +27,8 @@ def graphs(request: HttpRequest):
         # Calculate watts from yearly consumption: (kWh * 1000) / 8760 hours
         watts = int((yearly_consumption * 1000) / 8760)
     except (ValueError, TypeError):
-        fixed_price = 7.0
-        yearly_consumption = 10000
+        fixed_price = 12.0
+        yearly_consumption = 13000
         shelly_controlled_percentage = 30.0
         watts = 1141
 
@@ -56,30 +56,6 @@ def graphs(request: HttpRequest):
             if not selected_user:
                 selected_user = users.first() or request.user
 
-    # Get all available historical data (flexible time period)
-    # First, check what data we actually have
-    earliest_price = ElectricityPrice.objects.order_by("start_time").first()
-    latest_price = ElectricityPrice.objects.order_by("-start_time").first()
-
-    if earliest_price and latest_price:
-        # Use actual data range instead of fixed 365 days
-        start_date = earliest_price.start_time
-        end_date = latest_price.start_time
-    else:
-        # Fallback to past year if no data
-        end_date = TimeUtils.now_utc()
-        start_date = end_date - timedelta(days=365)
-
-    # Fetch all available electricity prices
-    historical_prices = ElectricityPrice.objects.filter(
-        start_time__gte=start_date, start_time__lte=end_date
-    ).order_by("start_time")
-
-    # Calculate costs for both scenarios (use selected_user instead of request.user)
-    graph_data = calculate_cost_comparison(
-        historical_prices, fixed_price, watts, selected_user, shelly_controlled_percentage
-    )
-
     thermostat_devices = ShellyTemperature.objects.filter(user=selected_user).order_by("familiar_name")
     selected_thermostat_id = request.GET.get("thermostat_device_id")
     selected_thermostat = None
@@ -88,43 +64,13 @@ def graphs(request: HttpRequest):
     if not selected_thermostat:
         selected_thermostat = thermostat_devices.first()
 
-    temp_graph_data = {"labels": [], "values": []}
-    temp_year_graph_data = {"labels": [], "values": []}
-    if selected_thermostat:
-        now_utc = TimeUtils.now_utc()
-        start_15d = now_utc - timedelta(days=15)
-        end_15d = now_utc + timedelta(days=15)
-
-        readings = TemperatureReading.objects.filter(
-            thermostat=selected_thermostat,
-            recorded_at__gte=start_15d,
-            recorded_at__lte=end_15d,
-        ).order_by("recorded_at")
-
-        user_tz = TimeUtils.get_user_timezone(request.user)
-        for reading in readings:
-            local_dt = reading.recorded_at.astimezone(user_tz)
-            temp_graph_data["labels"].append(local_dt.strftime("%d.%m %H:%M"))
-            temp_graph_data["values"].append(float(reading.temperature_c))
-
-        year_start = now_utc - timedelta(days=365)
-        year_readings = TemperatureReading.objects.filter(
-            thermostat=selected_thermostat,
-            recorded_at__gte=year_start,
-        ).order_by("recorded_at")
-
-        monthly = {}
-        for reading in year_readings:
-            local_dt = reading.recorded_at.astimezone(user_tz)
-            key = local_dt.strftime("%Y-%m")
-            monthly.setdefault(key, []).append(float(reading.temperature_c))
-
-        for key in sorted(monthly.keys()):
-            values = monthly[key]
-            avg = sum(values) / len(values)
-            label = datetime.strptime(key, "%Y-%m").strftime("%b %Y")
-            temp_year_graph_data["labels"].append(label)
-            temp_year_graph_data["values"].append(round(avg, 2))
+    shelly_devices = ShellyDevice.objects.filter(user=selected_user).order_by("familiar_name")
+    selected_run_history_device_id = request.GET.get("run_history_device_id")
+    selected_run_history_device = None
+    if selected_run_history_device_id:
+        selected_run_history_device = shelly_devices.filter(device_id=selected_run_history_device_id).first()
+    if not selected_run_history_device:
+        selected_run_history_device = shelly_devices.first()
 
     context = {
         "title": "Cost Graphs",
@@ -133,11 +79,10 @@ def graphs(request: HttpRequest):
         "yearly_consumption": yearly_consumption,
         "watts": watts,
         "shelly_controlled_percentage": shelly_controlled_percentage,
-        "graph_data": json.dumps(graph_data),
         "thermostat_devices": thermostat_devices,
         "selected_thermostat": selected_thermostat,
-        "temperature_graph_data": json.dumps(temp_graph_data),
-        "temperature_year_graph_data": json.dumps(temp_year_graph_data),
+        "shelly_devices": shelly_devices,
+        "selected_run_history_device": selected_run_history_device,
         "version": get_version_info(),
         "users": users,
         "selected_user": selected_user,
@@ -150,8 +95,8 @@ def graphs(request: HttpRequest):
 def get_graph_data(request: HttpRequest):
     """AJAX endpoint to get updated graph data."""
 
-    fixed_price = request.GET.get("fixed_price", "7.0")
-    yearly_consumption = request.GET.get("yearly_consumption", "10000")
+    fixed_price = request.GET.get("fixed_price", "12.0")
+    yearly_consumption = request.GET.get("yearly_consumption", "13000")
     shelly_controlled_percentage = request.GET.get("shelly_controlled_percentage", "30")
 
     try:
@@ -210,6 +155,84 @@ def get_graph_data(request: HttpRequest):
     )
 
     return JsonResponse({"graph_data": graph_data})
+
+
+@login_required
+def get_temperature_data(request: HttpRequest):
+    """AJAX endpoint returning temperature chart data for the selected thermostat."""
+    selected_user = request.user
+    if request.user.is_superuser:
+        from django.contrib.auth.models import User
+        user_id = request.GET.get("user_id")
+        if user_id:
+            selected_user = User.objects.filter(id=user_id).first() or request.user
+
+    thermostat_id = request.GET.get("thermostat_device_id")
+    thermostat = None
+    if thermostat_id:
+        thermostat = ShellyTemperature.objects.filter(device_id=thermostat_id, user=selected_user).first()
+    if not thermostat:
+        thermostat = ShellyTemperature.objects.filter(user=selected_user).order_by("familiar_name").first()
+
+    temp_graph_data = {"labels": [], "values": []}
+    temp_year_graph_data = {"labels": [], "values": []}
+
+    if thermostat:
+        now_utc = TimeUtils.now_utc()
+        user_tz = TimeUtils.get_user_timezone(request.user)
+
+        readings = TemperatureReading.objects.filter(
+            thermostat=thermostat,
+            recorded_at__gte=now_utc - timedelta(days=15),
+            recorded_at__lte=now_utc + timedelta(days=15),
+        ).order_by("recorded_at")
+        for reading in readings:
+            local_dt = reading.recorded_at.astimezone(user_tz)
+            temp_graph_data["labels"].append(local_dt.strftime("%d.%m %H:%M"))
+            temp_graph_data["values"].append(float(reading.temperature_c))
+
+        year_readings = TemperatureReading.objects.filter(
+            thermostat=thermostat,
+            recorded_at__gte=now_utc - timedelta(days=365),
+        ).order_by("recorded_at")
+        monthly = {}
+        for reading in year_readings:
+            key = reading.recorded_at.astimezone(user_tz).strftime("%Y-%m")
+            monthly.setdefault(key, []).append(float(reading.temperature_c))
+        for key in sorted(monthly.keys()):
+            vals = monthly[key]
+            temp_year_graph_data["labels"].append(datetime.strptime(key, "%Y-%m").strftime("%b %Y"))
+            temp_year_graph_data["values"].append(round(sum(vals) / len(vals), 2))
+
+    return JsonResponse({
+        "temperature_graph_data": temp_graph_data,
+        "temperature_year_graph_data": temp_year_graph_data,
+    })
+
+
+@login_required
+def get_run_history_data(request: HttpRequest):
+    """AJAX endpoint returning the 7-day run history calendar for the selected device."""
+    selected_user = request.user
+    if request.user.is_superuser:
+        from django.contrib.auth.models import User
+        user_id = request.GET.get("user_id")
+        if user_id:
+            selected_user = User.objects.filter(id=user_id).first() or request.user
+
+    device_id = request.GET.get("run_history_device_id")
+    device = None
+    if device_id:
+        device = ShellyDevice.objects.filter(device_id=device_id, user=selected_user).first()
+    if not device:
+        device = ShellyDevice.objects.filter(user=selected_user).order_by("familiar_name").first()
+
+    run_history_data: Dict[str, Any] = {"device_name": "", "days": []}
+    if device:
+        user_tz = TimeUtils.get_user_timezone(selected_user)
+        run_history_data = calculate_device_run_history(device, user_tz, TimeUtils.now_utc())
+
+    return JsonResponse({"run_history_data": run_history_data})
 
 
 def calculate_cost_comparison(
@@ -423,4 +446,40 @@ def calculate_cost_comparison(
         ),
         "is_simulated": simulate_full_usage,
         "total_periods": total_periods,
+    }
+
+
+def calculate_device_run_history(device, user_tz, now_utc) -> Dict[str, Any]:
+    """
+    Build a 7-day × 96-slot (24h × 4 quarter-hours) run history grid for a device.
+    A slot is True when a DeviceAssignment exists for that 15-minute period.
+    Deleted assignments (e.g. removed by thermostat logic) correctly appear as not-running.
+    """
+    week_ago_utc = now_utc - timedelta(days=7)
+
+    assignments = DeviceAssignment.objects.filter(
+        device=device,
+        electricity_price__start_time__gte=week_ago_utc,
+        electricity_price__start_time__lte=now_utc,
+    ).exclude(assignment_type="removed_overheat").select_related("electricity_price")
+
+    running_slots: set = set()
+    for assignment in assignments:
+        local_dt = assignment.electricity_price.start_time.astimezone(user_tz)
+        date_str = local_dt.strftime("%Y-%m-%d")
+        slot = local_dt.hour * 4 + local_dt.minute // 15
+        running_slots.add((date_str, slot))
+
+    days = []
+    for i in range(6, -1, -1):
+        day_utc = now_utc - timedelta(days=i)
+        local_day = day_utc.astimezone(user_tz)
+        date_str = local_day.strftime("%Y-%m-%d")
+        label = local_day.strftime("%a %d.%m")
+        slots = [(date_str, s) in running_slots for s in range(96)]
+        days.append({"label": label, "slots": slots})
+
+    return {
+        "device_name": device.familiar_name,
+        "days": days,
     }

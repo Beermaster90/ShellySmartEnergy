@@ -181,7 +181,8 @@
                     data-cheapest-hours="{{ device.cheapest_hours|join:',' }}"
                     data-device-status="{{ device.status }}"
                     data-thermostat-name="{% if device.thermostat_device %}{{ device.thermostat_device.familiar_name }}{% endif %}"
-                    data-thermostat-min="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature }}{% endif %}"
+                    data-thermostat-min-winter="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_winter }}{% endif %}"
+                    data-thermostat-min-summer="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_summer }}{% endif %}"
                     data-thermostat-max="{% if device.thermostat_device %}{{ device.thermostat_device.max_temperature }}{% endif %}"
                     data-thermostat-target="{% if device.thermostat_device %}{{ device.thermostat_device.hoped_temperature }}{% endif %}"
                     data-thermostat-current="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.current_temperature }}{% endif %}"
@@ -231,7 +232,9 @@
             <div id="thermostatInfo" class="device-info-columns" style="display: none;">
                 <div class="device-info-left">
                     <p><strong>Thermostat Device:</strong> <span id="thermostatNameText">-</span></p>
-                    <p><strong>Min Temperature:</strong> <span id="thermostatMinText">-</span></p>
+                    <p><strong>Min Temperature (Winter, Sep–Mar):</strong> <span id="thermostatMinWinterText">-</span></p>
+                    <p><strong>Min Temperature (Summer, Apr–Aug):</strong> <span id="thermostatMinSummerText">-</span></p>
+                    <p><strong>Active Min Temperature:</strong> <span id="thermostatMinActiveText" style="font-weight:700; color:#2471a3;">-</span></p>
                     <p><strong>Max Temperature:</strong> <span id="thermostatMaxText">-</span></p>
                 </div>
                 <div class="device-info-right">
@@ -250,12 +253,16 @@
                     <th>Price (c/kWh)</th>
                     <th>Total Price (c/kWh)</th>
                     <th>Assigned</th>
+                    <th title="Forced ON by min temperature override">Forced</th>
+                    <th title="Removed by thermostat overheating">Removed</th>
                 </tr>
             </thead>
             <tbody>
                 {% for price in prices %}
                 <tr class="{% if price.time_key == current_time_key %}current-hour{% endif %} price-row"
                     data-assigned="{{ price.assigned_devices }}"
+                    data-forced="{{ price.forced_devices }}"
+                    data-removed-overheat="{{ price.removed_overheat_devices }}"
                     data-time-key="{{ price.time_key }}"
                     data-price-id="{{ price.id }}"
                     style="cursor: pointer;"
@@ -264,10 +271,12 @@
                     <td class="price-value" data-price="{{ price.price_kwh }}">{{ price.price_kwh|floatformat:2 }} c/kWh</td>
                     <td class="total-price">-</td>
                     <td class="assigned">-</td>
+                    <td class="forced" style="color:#e67e22; font-weight:600;"></td>
+                    <td class="removed-overheat" style="color:#c0392b; font-weight:600;"></td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="4">No prices available.</td>
+                    <td colspan="6">No prices available.</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -315,10 +324,19 @@
                 let selectedDeviceId = document.getElementById("deviceSelect").value.trim();
                 document.querySelectorAll("tbody tr").forEach(row => {
                     let assignedDevices = row.getAttribute("data-assigned") || "";
-                    // Ensure all IDs are compared as strings and trimmed
                     let assignedList = assignedDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
                     let isAssigned = assignedList.includes(selectedDeviceId);
                     row.querySelector(".assigned").textContent = isAssigned ? "X" : "";
+
+                    let forcedDevices = row.getAttribute("data-forced") || "";
+                    let forcedList = forcedDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
+                    let isForced = forcedList.includes(selectedDeviceId);
+                    row.querySelector(".forced").textContent = isForced ? "X" : "";
+
+                    let removedDevices = row.getAttribute("data-removed-overheat") || "";
+                    let removedList = removedDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
+                    let isRemoved = removedList.includes(selectedDeviceId);
+                    row.querySelector(".removed-overheat").textContent = isRemoved ? "Overheating" : "";
                 });
             }
 
@@ -413,7 +431,11 @@
                 let hoursNeeded = parseInt(selectedOption.getAttribute("data-hours-needed")) || 0;
                 let deviceStatus = parseInt(selectedOption.getAttribute("data-device-status")) || 0;
                 let thermostatName = selectedOption.getAttribute("data-thermostat-name") || "";
-                let thermostatMin = selectedOption.getAttribute("data-thermostat-min") || "";
+                let thermostatMinWinter = selectedOption.getAttribute("data-thermostat-min-winter") || "";
+                let thermostatMinSummer = selectedOption.getAttribute("data-thermostat-min-summer") || "";
+                const currentMonth = new Date().getMonth() + 1; // 1-based
+                const isSummer = currentMonth >= 4 && currentMonth <= 8;
+                let thermostatMin = isSummer ? thermostatMinSummer : thermostatMinWinter;
                 let thermostatMax = selectedOption.getAttribute("data-thermostat-max") || "";
                 let thermostatTarget = selectedOption.getAttribute("data-thermostat-target") || "";
                 let thermostatCurrent = selectedOption.getAttribute("data-thermostat-current") || "";
@@ -428,7 +450,9 @@
                 if (thermostatName) {
                     thermostatInfo.style.display = "block";
                     document.getElementById("thermostatNameText").innerText = thermostatName;
-                    document.getElementById("thermostatMinText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " C" : "-";
+                    document.getElementById("thermostatMinWinterText").innerText = thermostatMinWinter ? parseFloat(thermostatMinWinter).toFixed(2) + " C" : "-";
+                    document.getElementById("thermostatMinSummerText").innerText = thermostatMinSummer ? parseFloat(thermostatMinSummer).toFixed(2) + " C" : "-";
+                    document.getElementById("thermostatMinActiveText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " C (" + (isSummer ? "summer" : "winter") + ")" : "-";
                     document.getElementById("thermostatMaxText").innerText = thermostatMax ? parseFloat(thermostatMax).toFixed(2) + " C" : "-";
                     document.getElementById("thermostatTargetText").innerText = thermostatTarget ? parseFloat(thermostatTarget).toFixed(2) + " C" : "-";
                     document.getElementById("thermostatCurrentText").innerText = thermostatCurrent ? parseFloat(thermostatCurrent).toFixed(2) + " C" : "N/A";

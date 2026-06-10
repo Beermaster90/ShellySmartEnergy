@@ -64,7 +64,8 @@ class ThermostatAssignmentManagerTest(TestCase):
             familiar_name="Thermostat",
             shelly_api_key="thermostat-key",
             user=self.user,
-            min_temperature=Decimal("18.0"),
+            min_temperature_winter=Decimal("18.0"),
+            min_temperature_summer=Decimal("15.0"),
             max_temperature=Decimal("20.0"),
             current_temperature=Decimal("21.0"),
             temperature_updated_at=self.now,
@@ -131,10 +132,10 @@ class ThermostatAssignmentManagerTest(TestCase):
         with patch("app.thermostat_manager.TimeUtils.now_utc", return_value=self.now):
             ThermostatAssignmentManager.apply_next_period_assignments()
 
-        self.assertFalse(
-            DeviceAssignment.objects.filter(
-                user=self.user,
-                device=device,
-                electricity_price=next_price,
-            ).exists()
-        )
+        assignment = DeviceAssignment.objects.filter(
+            user=self.user,
+            device=device,
+            electricity_price=next_price,
+        ).first()
+        self.assertIsNotNone(assignment)
+        self.assertEqual(assignment.assignment_type, "removed_overheat")

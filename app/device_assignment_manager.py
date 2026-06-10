@@ -16,23 +16,29 @@ class DeviceAssignmentManager:
         """
         self.user = user
 
-    def log_assignment(self, device, electricity_price):
+    def log_assignment(self, device, electricity_price, assignment_type="cheapest"):
         """
         Logs a device assignment for the current user.
         Prevents duplicate assignments for the same price period.
+        If the period is already assigned with a lower-priority type, upgrades to forced_min.
         """
-        existing_assignment = DeviceAssignment.objects.filter(
+        existing = DeviceAssignment.objects.filter(
             user=self.user,
             device=device,
-            electricity_price=electricity_price
-        ).exists()
+            electricity_price=electricity_price,
+        ).first()
 
-        if not existing_assignment:
+        if not existing:
             return DeviceAssignment.objects.create(
                 user=self.user,
                 device=device,
-                electricity_price=electricity_price
+                electricity_price=electricity_price,
+                assignment_type=assignment_type,
             )
+        if assignment_type == "forced_min" and existing.assignment_type != "forced_min":
+            existing.assignment_type = "forced_min"
+            existing.save(update_fields=["assignment_type"])
+        return existing
 
     def get_device_cheapest_hours(self, devices):
         """
@@ -42,13 +48,13 @@ class DeviceAssignmentManager:
         now = TimeUtils.now_utc()
         next_24h = now + timedelta(hours=24)
 
-        # Preload assignments for all devices
+        # Preload active assignments for all devices (excluded removed_overheat)
         assignments = DeviceAssignment.objects.filter(
-            user=self.user,  # Fetch only assignments for the logged-in user
+            user=self.user,
             device__in=devices,
             electricity_price__start_time__gte=now,
-            electricity_price__start_time__lt=next_24h
-        ).select_related("electricity_price")
+            electricity_price__start_time__lt=next_24h,
+        ).exclude(assignment_type="removed_overheat").select_related("electricity_price")
 
         # Create a dictionary mapping device_id to assigned hours
         device_assignments = {}

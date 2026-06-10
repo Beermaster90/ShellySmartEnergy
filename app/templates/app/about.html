@@ -2,123 +2,169 @@
 
 {% block content %}
 
-<h2>{{ title }}</h2>
-<h3>{{ message }}</h3>
+<div class="page-header">
+    <h2>Device Logs</h2>
+    <p class="text-muted">Showing up to 500 most recent entries.</p>
+</div>
 
-<style>
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 20px;
-    }
+<!-- Device + Status filters -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="panel panel-primary">
+            <div class="panel-heading">
+                <h3 class="panel-title">Filters</h3>
+            </div>
+            <div class="panel-body">
+                <div class="form-horizontal">
+                    <div class="form-group">
+                        <label class="col-sm-2 control-label">Device:</label>
+                        <div class="col-sm-4">
+                            <select id="deviceSelect" class="form-control" onchange="updateDeviceSelection()">
+                                <option value="" {% if not selected_device_id %}selected{% endif %}>All Devices</option>
+                                {% if users %}
+                                <option value="system" {% if selected_device_id == "system" %}selected{% endif %}>System (no device)</option>
+                                {% endif %}
+                                {% for device in shelly_devices %}
+                                    <option value="{{ device.device_id }}" {% if selected_device_id == device.device_id|stringformat:"s" %}selected{% endif %}>
+                                        {{ device.familiar_name }}
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <label class="col-sm-2 control-label">Status:</label>
+                        <div class="col-sm-3">
+                            <select id="statusSelect" class="form-control" onchange="updateStatusSelection()">
+                                <option value="" {% if not status_filter %}selected{% endif %}>All</option>
+                                <option value="INFO" {% if status_filter == "INFO" %}selected{% endif %}>Info</option>
+                                <option value="WARN" {% if status_filter == "WARN" %}selected{% endif %}>Warning</option>
+                                <option value="ERROR" {% if status_filter == "ERROR" %}selected{% endif %}>Error</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 
-    th, td {
-        border: 1px solid black;
-        padding: 10px;
-        text-align: left;
-    }
+<!-- Log table -->
+<div class="row">
+    <div class="col-md-12">
+        <div class="panel panel-default">
+            <div class="panel-body" style="overflow-x:auto;">
+                <table class="table table-bordered table-condensed log-table">
+                    <thead>
+                        <tr>
+                            <th style="width:160px;">Timestamp</th>
+                            <th style="width:160px;">Device</th>
+                            <th style="width:80px;">Status</th>
+                            <th>Message</th>
+                        </tr>
+                        <!-- Per-column text filter row -->
+                        <tr class="filter-row">
+                            <th><input type="text" class="form-control input-sm col-filter" id="filterTimestamp" placeholder="e.g. 16:30 or 2026-06-10"></th>
+                            <th><input type="text" class="form-control input-sm col-filter" id="filterDevice" placeholder="Device name…"></th>
+                            <th><!-- status handled by dropdown above --></th>
+                            <th><input type="text" class="form-control input-sm col-filter" id="filterMessage" placeholder="Message text…"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="logTableBody">
+                        {% for log in logs %}
+                        <tr>
+                            <td class="log-ts">{{ log.created_at_local }}</td>
+                            <td class="log-dev">{{ log.device.familiar_name|default:"System" }}</td>
+                            <td class="log-status {{ log.status }}">{{ log.status }}</td>
+                            <td class="log-msg">{{ log.message }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr id="noLogsRow">
+                            <td colspan="4" class="text-muted text-center">No logs found.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <p id="filterCount" class="text-muted small" style="margin-top:4px;"></p>
+            </div>
+        </div>
+    </div>
+</div>
 
-    th {
-        background-color: #f4f4f4;
-    }
+{% endblock %}
 
-    .INFO {
-        color: green;
-    }
-
-    .WARN {
-        color: orange;
-    }
-
-    .ERROR {
-        color: red;
-    }
-</style>
-
-<h1>Device Logs</h1>
-
-<label for="statusFilter">Filter by Status:</label>
-<select id="statusFilter" onchange="applyFilter()">
-    <option value="">All</option>
-    <option value="DEBUG">Debug</option>
-    <option value="INFO">Info</option>
-    <option value="WARN">Warning</option>
-    <option value="ERROR">Error</option>
-</select>
-
-<table>
-    <thead>
-        <tr>
-            <th>Timestamp (Local)</th>
-            <th>Device</th>
-            <th>Status</th>
-            <th>Message</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for log in logs %}
-        <tr>
-            <!-- Store UTC time in a hidden data-utc attribute for JavaScript conversion -->
-            <td class="log-time" data-utc="{{ log.created_at|date:'c' }}">{{ log.created_at }}</td>
-            <td>{{ log.device.familiar_name|default:"N/A" }}</td>
-            <td class="{{ log.status }}">{{ log.status }}</td>
-            <td>{{ log.message }}</td>
-        </tr>
-        {% empty %}
-        <tr>
-            <td colspan="4">No logs available.</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-
-
-
+{% block scripts %}
 <script>
-
-    function applyFilter() {
-        let selectedStatus = document.getElementById("statusFilter").value;
-        let newUrl = window.location.pathname + (selectedStatus ? `?status=${selectedStatus}` : '');
-        window.location.href = newUrl;  // Reload page with filter
+    function buildUrl(extra) {
+        const url = new URL(window.location.href);
+        for (const [k, v] of Object.entries(extra)) {
+            if (v) url.searchParams.set(k, v);
+            else url.searchParams.delete(k);
+        }
+        return url.toString();
     }
 
-    // Keep filter selected after reload
-    document.addEventListener("DOMContentLoaded", function () {
-        let urlParams = new URLSearchParams(window.location.search);
-        let selectedStatus = urlParams.get("status");
-        if (selectedStatus) {
-            document.getElementById("statusFilter").value = selectedStatus;
-        }
-    });
+    function updateDeviceSelection() {
+        const v = document.getElementById('deviceSelect').value;
+        window.location.href = buildUrl({device_id: v});
+    }
 
-    document.addEventListener("DOMContentLoaded", function () {
-        document.querySelectorAll(".log-time").forEach(el => {
-            let utcString = el.dataset.utc.trim();  // Ensure no extra spaces
+    function updateStatusSelection() {
+        const v = document.getElementById('statusSelect').value;
+        window.location.href = buildUrl({status: v});
+    }
 
-            // Ensure timestamp is not empty
-            if (!utcString) {
-                console.warn("Empty timestamp detected:", el);
-                return;
-            }
+    // Client-side column filtering (timestamp + device + message wildcards)
+    function applyColumnFilters() {
+        const tsFilter   = document.getElementById('filterTimestamp').value.toLowerCase();
+        const devFilter  = document.getElementById('filterDevice').value.toLowerCase();
+        const msgFilter  = document.getElementById('filterMessage').value.toLowerCase();
+        const rows = document.querySelectorAll('#logTableBody tr');
+        let visible = 0;
+        rows.forEach(row => {
+            if (!row.querySelector('.log-ts')) return; // skip empty/header rows
+            const ts  = row.querySelector('.log-ts').textContent.toLowerCase();
+            const dev = row.querySelector('.log-dev').textContent.toLowerCase();
+            const msg = row.querySelector('.log-msg').textContent.toLowerCase();
+            const match = ts.includes(tsFilter) && dev.includes(devFilter) && msg.includes(msgFilter);
+            row.style.display = match ? '' : 'none';
+            if (match) visible++;
+        });
+        const total = document.querySelectorAll('#logTableBody tr.visible-row, #logTableBody tr:not([style*="display: none"])').length;
+        document.getElementById('filterCount').textContent =
+            (tsFilter || devFilter || msgFilter)
+                ? `Showing ${visible} of ${rows.length} entries`
+                : '';
+    }
 
-            // Convert to Date object
-            let utcDate = new Date(utcString);
-
-            // Validate date parsing
-            if (isNaN(utcDate.getTime())) {
-                console.error("Invalid UTC date:", utcString);
-                return;
-            }
-
-            // Convert to browser's local timezone
-            let localTime = utcDate.toLocaleString(undefined, {
-                year: 'numeric', month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit'
-            });
-
-            el.textContent = localTime; // Replace UTC with local time
+    document.addEventListener('DOMContentLoaded', function () {
+        ['filterTimestamp', 'filterDevice', 'filterMessage'].forEach(id => {
+            document.getElementById(id).addEventListener('input', applyColumnFilters);
         });
     });
 </script>
 
+<style>
+    .INFO  { color: #27ae60; font-weight: 600; }
+    .WARN  { color: #e67e22; font-weight: 600; }
+    .ERROR { color: #e74c3c; font-weight: 600; }
+
+    .log-table thead th {
+        vertical-align: middle;
+        background-color: #f4f4f4;
+    }
+    .filter-row th {
+        background-color: #fff;
+        padding: 4px 6px;
+    }
+    .log-table tbody tr:hover {
+        background-color: #f9f9f9;
+    }
+    .log-table td {
+        vertical-align: top;
+        font-size: 13px;
+    }
+    .log-table td.log-msg {
+        word-break: break-word;
+        max-width: 600px;
+    }
+</style>
 {% endblock %}

@@ -352,25 +352,42 @@ def set_cheapest_hours():
             )
             return
 
-        devices = ShellyDevice.objects.all()
+        devices = ShellyDevice.objects.select_related("thermostat_device").all()
         print("Found", len(devices), "devices.")
 
         for device in devices:
             print(f"Processing device: {device.device_id} ({device.familiar_name})")
 
-            # Get cheapest hours for this device
-            cheapest_hours = get_cheapest_hours(
+            # Thermostat takes priority: skip all assignments if temperature is above max
+            if device.thermostat_device:
+                thermostat = device.thermostat_device
+                if (
+                    thermostat.temperature_updated_at
+                    and (current_time - thermostat.temperature_updated_at) <= timedelta(minutes=15)
+                    and thermostat.current_temperature > thermostat.max_temperature + Decimal("0.5")
+                ):
+                    log_device_event(
+                        device,
+                        f"Skipping assignments: thermostat {thermostat.familiar_name} above max "
+                        f"({thermostat.current_temperature} > {thermostat.max_temperature + Decimal('0.5')}).",
+                        "INFO",
+                    )
+                    continue
+
+            # Get cheapest hours for this device (tagged with assignment type)
+            tagged_hours = get_cheapest_hours(
                 prices,
                 device.day_transfer_price,
                 device.night_transfer_price,
                 device.run_hours_per_day,
                 device.auto_assign_price_threshold,
+                return_tagged=True,
             )
 
             # Create an assignment manager for the device's user
             assignment_manager = DeviceAssignmentManager(device.user)
 
-            for hour in cheapest_hours:
+            for hour, a_type in tagged_hours:
                 # Normalize both timestamps to ensure minute-level matching
                 price_entry = next(
                     (
@@ -399,7 +416,9 @@ def set_cheapest_hours():
 
                     if not existing_assignment:
                         assignment_manager.log_assignment(
-                            device, ElectricityPrice.objects.get(id=price_entry["id"])
+                            device,
+                            ElectricityPrice.objects.get(id=price_entry["id"]),
+                            assignment_type=a_type,
                         )
 
         print("Assignments successfully updated at", current_time)
@@ -423,8 +442,14 @@ def get_cheapest_hours(
     hours_needed: int,
     price_threshold: float | None = None,
     local_tz: timezone = LOCAL_TZ,
+    return_tagged: bool = False,
 ):
+    """Return cheapest + threshold slots.
 
+    When return_tagged=True, returns list of (timestamp, assignment_type) tuples
+    where assignment_type is 'cheapest' or 'threshold'.
+    When return_tagged=False (default), returns plain list of timestamps.
+    """
     day_tp = Decimal(str(day_transfer_price))
     night_tp = Decimal(str(night_transfer_price))
     threshold = Decimal(str(price_threshold)) if price_threshold is not None else None
@@ -435,26 +460,25 @@ def get_cheapest_hours(
     for entry in prices:
         ts: datetime = entry["start_time"]
 
-        # 1️⃣  Make the timestamp timezone-aware *in local time*
         if ts.tzinfo is None:
             ts = local_tz.localize(ts)
-        local_ts = ts.astimezone(local_tz)  # guarantees local clock time
+        local_ts = ts.astimezone(local_tz)
 
-        # 2️⃣  Day or night in *local* clock (7:00-21:59 is day time)
         is_daytime = (7 <= local_ts.hour < 22) or (local_ts.hour == 22 and local_ts.minute == 0)
         transfer = day_tp if is_daytime else night_tp
-
-        # 3️⃣  Total price using Decimal to avoid rounding surprises
         total = Decimal(str(entry["price_kwh"])) + transfer
 
-        enriched.append((total, ts))  # keep original tz for caller
+        enriched.append((total, ts))
         if threshold is not None and total <= threshold:
             forced_slots.append(ts)
 
-    # 4️⃣  Pick the N cheapest 15-minute periods (hours_needed * 4)
     enriched.sort(key=lambda x: x[0])
-    periods_needed = hours_needed * 4  # Convert hours to 15-minute periods
+    periods_needed = hours_needed * 4
     cheapest_slots = [slot for _, slot in enriched[:periods_needed]]
     cheapest_set = set(cheapest_slots)
     forced_extras = [slot for slot in forced_slots if slot not in cheapest_set]
+
+    if return_tagged:
+        return [(slot, "cheapest") for slot in cheapest_slots] + \
+               [(slot, "threshold") for slot in forced_extras]
     return cheapest_slots + forced_extras

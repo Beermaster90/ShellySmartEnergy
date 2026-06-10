@@ -72,3 +72,5 @@ node_modules/
 #Docker packages
 *.tar
 .vs/
+data/.django_secret_key
+.claude/settings.json

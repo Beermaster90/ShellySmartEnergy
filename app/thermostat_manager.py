@@ -52,30 +52,38 @@ class ThermostatAssignmentManager:
                 continue
 
             current_temp = thermostat.current_temperature
-            min_temp = thermostat.min_temperature
+            min_temp = thermostat.get_effective_min_temperature()
             max_temp = thermostat.max_temperature
             hysteresis = type(min_temp)(str(ThermostatAssignmentManager.HYSTERESIS_C))
             min_trigger = min_temp - hysteresis
             max_trigger = max_temp + hysteresis
 
             if current_temp < min_trigger:
+                # Min temperature overrides all rules — force assign regardless of price.
+                # Also re-activates any previously removed_overheat record.
                 assignment, created = DeviceAssignment.objects.get_or_create(
                     user=device.user,
                     device=device,
                     electricity_price=next_price,
+                    defaults={"assignment_type": "forced_min"},
                 )
+                if not created and assignment.assignment_type != "forced_min":
+                    assignment.assignment_type = "forced_min"
+                    assignment.save(update_fields=["assignment_type"])
+                    created = True  # treat upgrade as "changed" for logging
                 if created:
                     log_device_event(
                         device,
-                        f"Thermostat below min ({current_temp} < {min_trigger}). Assigned next period {next_price.start_time} UTC.",
+                        f"Thermostat below min ({current_temp} < {min_trigger}). Forced assigned next period {next_price.start_time} UTC.",
                         "INFO",
                     )
             elif current_temp > max_trigger:
+                # Only consider active (non-removed) assignments
                 assignment_qs = DeviceAssignment.objects.filter(
                     user=device.user,
                     device=device,
                     electricity_price=next_price,
-                )
+                ).exclude(assignment_type="removed_overheat")
                 is_protected_minimum_period = (
                     assignment_qs.exists()
                     and ThermostatAssignmentManager._is_minimum_run_period(
@@ -90,8 +98,8 @@ class ThermostatAssignmentManager:
                     )
                     continue
 
-                deleted, _ = assignment_qs.delete()
-                if deleted:
+                updated = assignment_qs.update(assignment_type="removed_overheat")
+                if updated:
                     log_device_event(
                         device,
                         f"Thermostat above max ({current_temp} > {max_trigger}). Unassigned next period {next_price.start_time} UTC.",
