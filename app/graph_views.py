@@ -3,7 +3,7 @@ from django.shortcuts import render
 from django.http import HttpRequest, JsonResponse
 from django.contrib.auth.decorators import login_required
 from django.db.models import Q
-from .models import ElectricityPrice, ShellyDevice, DeviceAssignment, ShellyTemperature, TemperatureReading
+from .models import ElectricityPrice, ShellyDevice, DeviceAssignment, ShellyTemperature, TemperatureReading, EVCharger
 from app.utils.time_utils import TimeUtils
 from .views import get_version_info
 import json
@@ -72,6 +72,14 @@ def graphs(request: HttpRequest):
     if not selected_run_history_device:
         selected_run_history_device = shelly_devices.first()
 
+    ev_chargers = EVCharger.objects.filter(user=selected_user).order_by("familiar_name")
+    selected_ev_charger_id = request.GET.get("ev_charger_id")
+    selected_ev_charger = None
+    if selected_ev_charger_id:
+        selected_ev_charger = ev_chargers.filter(id=selected_ev_charger_id).first()
+    if not selected_ev_charger:
+        selected_ev_charger = ev_chargers.first()
+
     context = {
         "title": "Cost Graphs",
         "year": datetime.now().year,
@@ -83,6 +91,8 @@ def graphs(request: HttpRequest):
         "selected_thermostat": selected_thermostat,
         "shelly_devices": shelly_devices,
         "selected_run_history_device": selected_run_history_device,
+        "ev_chargers": ev_chargers,
+        "selected_ev_charger": selected_ev_charger,
         "version": get_version_info(),
         "users": users,
         "selected_user": selected_user,

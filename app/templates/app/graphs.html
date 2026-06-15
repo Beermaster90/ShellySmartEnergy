@@ -196,6 +196,54 @@
     </div>
 </div>
 
+<!-- EV Charger Energy History + Monthly Cost -->
+{% if ev_chargers %}
+<div class="row" style="margin-top: 30px;">
+    <div class="col-md-12">
+        <div class="panel panel-warning">
+            <div class="panel-heading">
+                <h3 class="panel-title">EV Charger — Daily Energy Charged (kWh)</h3>
+            </div>
+            <div class="panel-body">
+                <div class="form-group">
+                    <label for="evChargerSelect">Select EV Charger:</label>
+                    <select id="evChargerSelect" class="form-control" style="max-width: 400px;"
+                            onchange="loadEVCharts()">
+                        {% for charger in ev_chargers %}
+                            <option value="{{ charger.id }}" {% if selected_ev_charger and charger.id == selected_ev_charger.id %}selected{% endif %}>
+                                {{ charger.familiar_name }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div id="evEnergyLoading" class="text-center text-muted" style="padding: 30px 0;">
+                    <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading…
+                </div>
+                <canvas id="evEnergyChart" height="300" style="display:none;"></canvas>
+                <p id="evEnergyTotal" class="text-muted" style="margin-top:8px;"></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row" style="margin-top: 20px;">
+    <div class="col-md-12">
+        <div class="panel panel-danger">
+            <div class="panel-heading">
+                <h3 class="panel-title">EV Charger — Monthly Cost — Past 12 Months (€, incl. VAT + Transfer)</h3>
+            </div>
+            <div class="panel-body">
+                <div id="evMonthlyCostLoading" class="text-center text-muted" style="padding: 30px 0;">
+                    <i class="glyphicon glyphicon-refresh glyphicon-refresh-animate"></i> Loading…
+                </div>
+                <canvas id="evMonthlyCostChart" height="300" style="display:none;"></canvas>
+                <p id="evMonthlyCostTotal" class="text-muted" style="margin-top:8px;"></p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -715,5 +763,135 @@
         opacity: 0.75;
     }
 </style>
+
+<script>
+    // EV Charger charts
+    let evEnergyChart = null;
+    let evMonthlyCostChart = null;
+
+    function loadEVCharts() {
+        const sel = document.getElementById('evChargerSelect');
+        if (!sel) return;
+        const chargerId = sel.value;
+        if (!chargerId) return;
+
+        // Daily energy chart
+        document.getElementById('evEnergyLoading').style.display = 'block';
+        const energyCanvas = document.getElementById('evEnergyChart');
+        energyCanvas.style.display = 'none';
+        document.getElementById('evEnergyTotal').textContent = '';
+
+        fetch(`/shellyapp/ev-charger-energy/?charger_id=${chargerId}&days=30`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('evEnergyLoading').style.display = 'none';
+                if (data.error) return;
+                if (evEnergyChart) evEnergyChart.destroy();
+                energyCanvas.style.display = 'block';
+                evEnergyChart = new Chart(energyCanvas.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                        labels: data.labels,
+                        datasets: [{
+                            label: 'kWh charged',
+                            data: data.kwh,
+                            backgroundColor: 'rgba(255, 159, 64, 0.7)',
+                            borderColor: 'rgba(255, 159, 64, 1)',
+                            borderWidth: 1,
+                        }],
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            y: { beginAtZero: true, title: { display: true, text: 'kWh' } },
+                            x: { title: { display: true, text: 'Date' } },
+                        },
+                    },
+                });
+                document.getElementById('evEnergyTotal').textContent =
+                    `Total energy charged (all time): ${data.total_kwh} kWh`;
+            })
+            .catch(() => { document.getElementById('evEnergyLoading').style.display = 'none'; });
+
+        // Monthly cost chart
+        document.getElementById('evMonthlyCostLoading').style.display = 'block';
+        const costCanvas = document.getElementById('evMonthlyCostChart');
+        costCanvas.style.display = 'none';
+        document.getElementById('evMonthlyCostTotal').textContent = '';
+
+        fetch(`/shellyapp/ev-charger-monthly-cost/?charger_id=${chargerId}`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('evMonthlyCostLoading').style.display = 'none';
+                if (data.error) return;
+                if (evMonthlyCostChart) evMonthlyCostChart.destroy();
+                costCanvas.style.display = 'block';
+                evMonthlyCostChart = new Chart(costCanvas.getContext('2d'), {
+                    type: 'bar',
+                    data: {
+                        labels: data.labels,
+                        datasets: [
+                            {
+                                label: 'Cost (€)',
+                                data: data.cost_eur,
+                                backgroundColor: 'rgba(220, 53, 69, 0.7)',
+                                borderColor: 'rgba(220, 53, 69, 1)',
+                                borderWidth: 1,
+                                yAxisID: 'yCost',
+                            },
+                            {
+                                label: 'Energy (kWh)',
+                                data: data.kwh,
+                                backgroundColor: 'rgba(255, 193, 7, 0.5)',
+                                borderColor: 'rgba(255, 193, 7, 1)',
+                                borderWidth: 1,
+                                yAxisID: 'yKwh',
+                            },
+                        ],
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { position: 'top' },
+                            tooltip: {
+                                callbacks: {
+                                    label: ctx => ctx.datasetIndex === 0
+                                        ? `€${ctx.parsed.y.toFixed(2)}`
+                                        : `${ctx.parsed.y.toFixed(3)} kWh`,
+                                },
+                            },
+                        },
+                        scales: {
+                            yCost: {
+                                type: 'linear',
+                                position: 'left',
+                                beginAtZero: true,
+                                title: { display: true, text: '€' },
+                                ticks: { callback: v => '€' + v.toFixed(2) },
+                            },
+                            yKwh: {
+                                type: 'linear',
+                                position: 'right',
+                                beginAtZero: true,
+                                title: { display: true, text: 'kWh' },
+                                grid: { drawOnChartArea: false },
+                            },
+                            x: { title: { display: true, text: 'Month' } },
+                        },
+                    },
+                });
+                document.getElementById('evMonthlyCostTotal').textContent =
+                    `Past 12 months: ${data.total_kwh} kWh — €${data.total_cost_eur.toFixed(2)}`;
+            })
+            .catch(() => { document.getElementById('evMonthlyCostLoading').style.display = 'none'; });
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        {% if ev_chargers %}
+        loadEVCharts();
+        {% endif %}
+    });
+</script>
 
 {% endblock %}

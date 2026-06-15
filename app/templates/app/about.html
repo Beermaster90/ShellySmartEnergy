@@ -24,11 +24,24 @@
                                 {% if users %}
                                 <option value="system" {% if selected_device_id == "system" %}selected{% endif %}>System (no device)</option>
                                 {% endif %}
+                                {% if shelly_devices %}
+                                <optgroup label="Shelly Devices">
                                 {% for device in shelly_devices %}
                                     <option value="{{ device.device_id }}" {% if selected_device_id == device.device_id|stringformat:"s" %}selected{% endif %}>
                                         {{ device.familiar_name }}
                                     </option>
                                 {% endfor %}
+                                </optgroup>
+                                {% endif %}
+                                {% if ev_charger_devices %}
+                                <optgroup label="EV Chargers">
+                                {% for charger in ev_charger_devices %}
+                                    <option value="ev_{{ charger.id }}" {% if selected_device_id == "ev_"|add:charger.id|stringformat:"s" %}selected{% endif %}>
+                                        {{ charger.familiar_name }} [EV]
+                                    </option>
+                                {% endfor %}
+                                </optgroup>
+                                {% endif %}
                             </select>
                         </div>
                         <label class="col-sm-2 control-label">Status:</label>
@@ -72,7 +85,7 @@
                         {% for log in logs %}
                         <tr>
                             <td class="log-ts">{{ log.created_at_local }}</td>
-                            <td class="log-dev">{{ log.device.familiar_name|default:"System" }}</td>
+                            <td class="log-dev">{{ log.device_display_name }}</td>
                             <td class="log-status {{ log.status }}">{{ log.status }}</td>
                             <td class="log-msg">{{ log.message }}</td>
                         </tr>

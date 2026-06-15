@@ -5,6 +5,7 @@ from . import views
 from .shelly_views import fetch_device_status, toggle_device_output
 from .price_views import call_fetch_prices
 from .graph_views import graphs, get_graph_data, get_temperature_data, get_run_history_data
+from .ev_charger_views import ev_charger_energy_history, ev_charger_refresh_status, ev_charger_monthly_cost
 from django.contrib.auth import views as auth_views
 
 urlpatterns = [
@@ -37,4 +38,13 @@ urlpatterns = [
     path(
         "toggle-device-status/", views.toggle_device_status, name="toggle_device_status"
     ),  # AJAX endpoint for toggling device automation status
+    path(
+        "ev-charger-energy/", ev_charger_energy_history, name="ev_charger_energy_history"
+    ),  # AJAX endpoint for EV charger energy history
+    path(
+        "ev-charger-refresh/", ev_charger_refresh_status, name="ev_charger_refresh_status"
+    ),  # AJAX live-poll EV charger status
+    path(
+        "ev-charger-monthly-cost/", ev_charger_monthly_cost, name="ev_charger_monthly_cost"
+    ),  # AJAX monthly cost for EV charger
 ]

@@ -7,6 +7,8 @@ from .models import (
     DeviceLog,
     DeviceAssignment,
     AppSetting,
+    EVCharger,
+    EVChargerAssignment,
 )
 import pandas as pd
 from entsoe import EntsoeRawClient
@@ -418,6 +420,43 @@ def set_cheapest_hours():
                         assignment_manager.log_assignment(
                             device,
                             ElectricityPrice.objects.get(id=price_entry["id"]),
+                            assignment_type=a_type,
+                        )
+
+        # --- EV Chargers ---
+        ev_chargers = EVCharger.objects.all()
+        for charger in ev_chargers:
+            tagged_hours = get_cheapest_hours(
+                prices,
+                charger.day_transfer_price,
+                charger.night_transfer_price,
+                charger.run_hours_per_day,
+                charger.auto_assign_price_threshold,
+                return_tagged=True,
+            )
+
+            for hour, a_type in tagged_hours:
+                price_entry = next(
+                    (
+                        p for p in prices
+                        if TimeUtils.to_utc(p["start_time"]).strftime("%Y-%m-%d %H:%M")
+                        == TimeUtils.to_utc(hour).strftime("%Y-%m-%d %H:%M")
+                    ),
+                    None,
+                )
+                if price_entry:
+                    existing = EVChargerAssignment.objects.filter(
+                        user=charger.user,
+                        charger=charger,
+                        electricity_price_id=price_entry["id"],
+                        electricity_price__start_time__gte=current_time,
+                        electricity_price__start_time__lt=current_time + timedelta(hours=24),
+                    ).exists()
+                    if not existing:
+                        EVChargerAssignment.objects.create(
+                            user=charger.user,
+                            charger=charger,
+                            electricity_price_id=price_entry["id"],
                             assignment_type=a_type,
                         )
 

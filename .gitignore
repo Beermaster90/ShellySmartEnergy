@@ -74,3 +74,6 @@ node_modules/
 .vs/
 data/.django_secret_key
 .claude/settings.json
+
+# Tuya credentials
+tuya_test/tuya_credentials.py

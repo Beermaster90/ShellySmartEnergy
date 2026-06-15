@@ -3,7 +3,7 @@
 {% block content %}
 
 {% if user.is_authenticated %}
-    {% if devices %}
+    {% if devices or ev_chargers %}
     <div class="table-container">
 
         <style>
@@ -172,8 +172,11 @@
         <!-- Device Selection Dropdown -->
         <label for="deviceSelect">Select Device:</label>
         <select id="deviceSelect" onchange="updateDeviceData()">
+            {% if devices %}
+            <optgroup label="Shelly Devices">
             {% for device in devices %}
             <option value="{{ device.device_id }}"
+                    data-device-type="shelly"
                     data-day-price="{{ device.day_transfer_price }}"
                     data-night-price="{{ device.night_transfer_price }}"
                     data-hours-needed="{{ device.run_hours_per_day }}"
@@ -186,7 +189,8 @@
                     data-thermostat-max="{% if device.thermostat_device %}{{ device.thermostat_device.max_temperature }}{% endif %}"
                     data-thermostat-target="{% if device.thermostat_device %}{{ device.thermostat_device.hoped_temperature }}{% endif %}"
                     data-thermostat-current="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.current_temperature }}{% endif %}"
-                    data-thermostat-updated="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.temperature_updated_at|date:'c' }}{% endif %}">
+                    data-thermostat-updated="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.temperature_updated_at|date:'c' }}{% endif %}"
+                    {% if selected_device and device.device_id == selected_device.device_id %}selected{% endif %}>
                 {% if user.is_superuser and device.user != user %}
                     {{ device.familiar_name }} ({{ device.user.username }})
                 {% else %}
@@ -194,6 +198,37 @@
                 {% endif %}
             </option>
             {% endfor %}
+            </optgroup>
+            {% endif %}
+            {% if ev_chargers %}
+            <optgroup label="EV Chargers">
+            {% for charger in ev_chargers %}
+            <option value="ev_{{ charger.id }}"
+                    data-device-type="ev"
+                    data-day-price="{{ charger.day_transfer_price }}"
+                    data-night-price="{{ charger.night_transfer_price }}"
+                    data-hours-needed="{{ charger.run_hours_per_day }}"
+                    data-auto-assign-threshold="{{ charger.auto_assign_price_threshold }}"
+                    data-cheapest-hours="{{ charger.cheapest_hours|join:',' }}"
+                    data-device-status="{{ charger.status }}"
+                    data-charge-current="{{ charger.charge_current_a }}"
+                    data-charge-current-reduced="{{ charger.charge_current_reduced_a }}"
+                    data-is-charging="{{ charger.is_charging|yesno:'true,false' }}"
+                    data-work-state="{{ charger.work_state }}"
+                    data-connection-state="{{ charger.connection_state }}"
+                    data-temp-c="{{ charger.temp_c }}"
+                    data-session-energy="{{ charger.session_energy_kwh }}"
+                    data-last-contact="{% if charger.last_contact %}{{ charger.last_contact|date:'c' }}{% endif %}"
+                    {% if selected_ev_charger and charger.id == selected_ev_charger.id %}selected{% endif %}>
+                {% if user.is_superuser and charger.user != user %}
+                    {{ charger.familiar_name }} ({{ charger.user.username }}) [EV]
+                {% else %}
+                    {{ charger.familiar_name }} [EV]
+                {% endif %}
+            </option>
+            {% endfor %}
+            </optgroup>
+            {% endif %}
         </select>
 
         <!-- Transfer Prices Display -->
@@ -227,9 +262,29 @@
             </div>
         </div>
 
-        <div class="table-container">
+        <!-- EV Charger live status panel (shown only when an EV charger is selected) -->
+        <div id="evChargerInfoPanel" class="table-container" style="display: none;">
+            <h2>EV Charger Status</h2>
+            <div class="device-info-columns">
+                <div class="device-info-left">
+                    <p><strong>Charging:</strong> <span id="evIsChargingText" style="font-weight:bold;">-</span></p>
+                    <p><strong>Work State:</strong> <span id="evWorkStateText">-</span></p>
+                    <p><strong>Connection:</strong> <span id="evConnectionStateText">-</span></p>
+                </div>
+                <div class="device-info-right">
+                    <p><strong>Current Set:</strong> <span id="evChargeCurrentSetText">-</span> A</p>
+                    <p><strong>Charge Current (normal):</strong> <span id="evChargeCurrentText">-</span> A</p>
+                    <p><strong>Charge Current (reduced):</strong> <span id="evChargeCurrentReducedText">-</span> A</p>
+                    <p><strong>Session Energy:</strong> <span id="evSessionEnergyText">-</span> kWh</p>
+                    <p><strong>Temperature:</strong> <span id="evTempText">-</span> °C</p>
+                    <p><strong>Last Update:</strong> <span id="evLastContactText">-</span></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-container" id="thermostatSection" style="display: none;">
             <h2>Thermostat Information</h2>
-            <div id="thermostatInfo" class="device-info-columns" style="display: none;">
+            <div id="thermostatInfo" class="device-info-columns">
                 <div class="device-info-left">
                     <p><strong>Thermostat Device:</strong> <span id="thermostatNameText">-</span></p>
                     <p><strong>Min Temperature (Winter, Sep–Mar):</strong> <span id="thermostatMinWinterText">-</span></p>
@@ -424,50 +479,92 @@
                 let selectedOption = deviceSelect.options[deviceSelect.selectedIndex];
 
                 let selectedDeviceId = selectedOption.value;
+                const deviceType = selectedOption.getAttribute("data-device-type") || "shelly";
+                const isEV = deviceType === "ev";
+
                 let dayPrice = parseFloat(selectedOption.getAttribute("data-day-price")) || 0;
                 let nightPrice = parseFloat(selectedOption.getAttribute("data-night-price")) || 0;
                 let autoAssignThreshold = parseFloat(selectedOption.getAttribute("data-auto-assign-threshold")) || 0;
-                let cheapestHours = selectedOption.getAttribute("data-cheapest-hours") || "";
                 let hoursNeeded = parseInt(selectedOption.getAttribute("data-hours-needed")) || 0;
                 let deviceStatus = parseInt(selectedOption.getAttribute("data-device-status")) || 0;
-                let thermostatName = selectedOption.getAttribute("data-thermostat-name") || "";
-                let thermostatMinWinter = selectedOption.getAttribute("data-thermostat-min-winter") || "";
-                let thermostatMinSummer = selectedOption.getAttribute("data-thermostat-min-summer") || "";
-                const currentMonth = new Date().getMonth() + 1; // 1-based
-                const isSummer = currentMonth >= 4 && currentMonth <= 8;
-                let thermostatMin = isSummer ? thermostatMinSummer : thermostatMinWinter;
-                let thermostatMax = selectedOption.getAttribute("data-thermostat-max") || "";
-                let thermostatTarget = selectedOption.getAttribute("data-thermostat-target") || "";
-                let thermostatCurrent = selectedOption.getAttribute("data-thermostat-current") || "";
-                let thermostatUpdated = selectedOption.getAttribute("data-thermostat-updated") || "";
 
                 document.getElementById("dayPriceText").innerText = dayPrice.toFixed(2);
                 document.getElementById("nightPriceText").innerText = nightPrice.toFixed(2);
                 document.getElementById("hoursNeededText").innerText = hoursNeeded + " h";
                 document.getElementById("autoAssignThresholdText").innerText = autoAssignThreshold.toFixed(1);
 
-                const thermostatInfo = document.getElementById("thermostatInfo");
-                if (thermostatName) {
-                    thermostatInfo.style.display = "block";
-                    document.getElementById("thermostatNameText").innerText = thermostatName;
-                    document.getElementById("thermostatMinWinterText").innerText = thermostatMinWinter ? parseFloat(thermostatMinWinter).toFixed(2) + " C" : "-";
-                    document.getElementById("thermostatMinSummerText").innerText = thermostatMinSummer ? parseFloat(thermostatMinSummer).toFixed(2) + " C" : "-";
-                    document.getElementById("thermostatMinActiveText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " C (" + (isSummer ? "summer" : "winter") + ")" : "-";
-                    document.getElementById("thermostatMaxText").innerText = thermostatMax ? parseFloat(thermostatMax).toFixed(2) + " C" : "-";
-                    document.getElementById("thermostatTargetText").innerText = thermostatTarget ? parseFloat(thermostatTarget).toFixed(2) + " C" : "-";
-                    document.getElementById("thermostatCurrentText").innerText = thermostatCurrent ? parseFloat(thermostatCurrent).toFixed(2) + " C" : "N/A";
-                    if (thermostatUpdated) {
-                        const updatedDate = new Date(thermostatUpdated);
-                        const formattedUpdated = `${String(updatedDate.getDate()).padStart(2, '0')}.${String(updatedDate.getMonth() + 1).padStart(2, '0')} - ${String(updatedDate.getHours()).padStart(2, '0')}:${String(updatedDate.getMinutes()).padStart(2, '0')}`;
-                        document.getElementById("thermostatUpdatedText").innerText = formattedUpdated;
+                // EV Charger status panel
+                const evPanel = document.getElementById("evChargerInfoPanel");
+                if (isEV && evPanel) {
+                    evPanel.style.display = "block";
+                    const isCharging = selectedOption.getAttribute("data-is-charging") === "true";
+                    const workState = selectedOption.getAttribute("data-work-state") || "";
+                    const connectionState = selectedOption.getAttribute("data-connection-state") || "";
+                    const chargeCurrent = selectedOption.getAttribute("data-charge-current") || "6";
+                    const chargeCurrentReduced = selectedOption.getAttribute("data-charge-current-reduced") || "3";
+                    const sessionEnergy = parseFloat(selectedOption.getAttribute("data-session-energy")) || 0;
+                    const tempC = parseInt(selectedOption.getAttribute("data-temp-c")) || 0;
+                    const lastContact = selectedOption.getAttribute("data-last-contact") || "";
+
+                    const evIsChargingEl = document.getElementById("evIsChargingText");
+                    evIsChargingEl.innerText = isCharging ? "Yes" : "No";
+                    evIsChargingEl.style.color = isCharging ? "green" : "red";
+                    document.getElementById("evWorkStateText").innerText = workState || "Unknown";
+                    document.getElementById("evConnectionStateText").innerText = connectionState || "Unknown";
+                    document.getElementById("evChargeCurrentText").innerText = chargeCurrent;
+                    document.getElementById("evChargeCurrentReducedText").innerText = chargeCurrentReduced;
+                    document.getElementById("evSessionEnergyText").innerText = sessionEnergy.toFixed(3);
+                    document.getElementById("evTempText").innerText = tempC;
+                    if (lastContact) {
+                        const lc = new Date(lastContact);
+                        document.getElementById("evLastContactText").innerText =
+                            `${String(lc.getDate()).padStart(2,'0')}.${String(lc.getMonth()+1).padStart(2,'0')} `
+                            + `${String(lc.getHours()).padStart(2,'0')}:${String(lc.getMinutes()).padStart(2,'0')}`;
                     } else {
-                        document.getElementById("thermostatUpdatedText").innerText = "N/A";
+                        document.getElementById("evLastContactText").innerText = "N/A";
                     }
-                } else {
-                    thermostatInfo.style.display = "none";
+                } else if (evPanel) {
+                    evPanel.style.display = "none";
                 }
 
-                // Update toggle switch and status text
+                // Thermostat panel (only for Shelly devices with a thermostat assigned)
+                const thermostatSection = document.getElementById("thermostatSection");
+                if (!isEV) {
+                    let thermostatName = selectedOption.getAttribute("data-thermostat-name") || "";
+                    let thermostatMinWinter = selectedOption.getAttribute("data-thermostat-min-winter") || "";
+                    let thermostatMinSummer = selectedOption.getAttribute("data-thermostat-min-summer") || "";
+                    const currentMonth = new Date().getMonth() + 1;
+                    const isSummer = currentMonth >= 4 && currentMonth <= 8;
+                    let thermostatMin = isSummer ? thermostatMinSummer : thermostatMinWinter;
+                    let thermostatMax = selectedOption.getAttribute("data-thermostat-max") || "";
+                    let thermostatTarget = selectedOption.getAttribute("data-thermostat-target") || "";
+                    let thermostatCurrent = selectedOption.getAttribute("data-thermostat-current") || "";
+                    let thermostatUpdated = selectedOption.getAttribute("data-thermostat-updated") || "";
+
+                    if (thermostatName) {
+                        thermostatSection.style.display = "block";
+                        document.getElementById("thermostatNameText").innerText = thermostatName;
+                        document.getElementById("thermostatMinWinterText").innerText = thermostatMinWinter ? parseFloat(thermostatMinWinter).toFixed(2) + " C" : "-";
+                        document.getElementById("thermostatMinSummerText").innerText = thermostatMinSummer ? parseFloat(thermostatMinSummer).toFixed(2) + " C" : "-";
+                        document.getElementById("thermostatMinActiveText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " C (" + (isSummer ? "summer" : "winter") + ")" : "-";
+                        document.getElementById("thermostatMaxText").innerText = thermostatMax ? parseFloat(thermostatMax).toFixed(2) + " C" : "-";
+                        document.getElementById("thermostatTargetText").innerText = thermostatTarget ? parseFloat(thermostatTarget).toFixed(2) + " C" : "-";
+                        document.getElementById("thermostatCurrentText").innerText = thermostatCurrent ? parseFloat(thermostatCurrent).toFixed(2) + " C" : "N/A";
+                        if (thermostatUpdated) {
+                            const updatedDate = new Date(thermostatUpdated);
+                            const formattedUpdated = `${String(updatedDate.getDate()).padStart(2, '0')}.${String(updatedDate.getMonth() + 1).padStart(2, '0')} - ${String(updatedDate.getHours()).padStart(2, '0')}:${String(updatedDate.getMinutes()).padStart(2, '0')}`;
+                            document.getElementById("thermostatUpdatedText").innerText = formattedUpdated;
+                        } else {
+                            document.getElementById("thermostatUpdatedText").innerText = "N/A";
+                        }
+                    } else {
+                        thermostatSection.style.display = "none";
+                    }
+                } else {
+                    thermostatSection.style.display = "none";
+                }
+
+                // Update enable/disable toggle
                 const isEnabled = deviceStatus === 1;
                 document.getElementById("deviceEnabledToggle").checked = isEnabled;
                 document.getElementById("deviceEnabledText").textContent = isEnabled ? "Enabled" : "Disabled";
@@ -476,7 +573,6 @@
                 updateTotalPrices();
                 updateAssignedColumn();
 
-                // Only fetch device status if automation is enabled
                 if (!isEnabled) {
                     document.getElementById("deviceStatus").innerText = "Automation Disabled";
                     document.getElementById("deviceRunning").innerText = "N/A";
@@ -486,7 +582,54 @@
                     return;
                 }
 
-                // Fetch device status and update UI
+                if (isEV) {
+                    const rawId = selectedDeviceId.replace("ev_", "");
+                    document.getElementById("deviceStatus").innerText = "EV Charger";
+                    document.getElementById("deviceRunning").innerText = "Fetching…";
+                    document.getElementById("deviceStatus").style.color = "blue";
+                    document.getElementById("deviceRunning").style.color = "gray";
+
+                    fetch(`/shellyapp/ev-charger-refresh/?charger_id=${rawId}`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.error) {
+                                document.getElementById("deviceRunning").innerText = "Error";
+                                return;
+                            }
+                            // Update data attributes so values stay fresh
+                            selectedOption.setAttribute("data-is-charging", data.is_charging ? "true" : "false");
+                            selectedOption.setAttribute("data-work-state", data.work_state || "");
+                            selectedOption.setAttribute("data-connection-state", data.connection_state || "");
+                            selectedOption.setAttribute("data-temp-c", data.temp_c);
+                            selectedOption.setAttribute("data-session-energy", data.session_energy_kwh);
+                            selectedOption.setAttribute("data-last-contact", data.last_contact || "");
+
+                            const evIsChargingEl = document.getElementById("evIsChargingText");
+                            evIsChargingEl.innerText = data.is_charging ? "Yes" : "No";
+                            evIsChargingEl.style.color = data.is_charging ? "green" : "red";
+                            document.getElementById("evWorkStateText").innerText = data.work_state || "Unknown";
+                            document.getElementById("evConnectionStateText").innerText = data.connection_state || "Unknown";
+                            document.getElementById("evChargeCurrentSetText").innerText = data.charge_current_set_a || "-";
+                            document.getElementById("evSessionEnergyText").innerText = parseFloat(data.session_energy_kwh).toFixed(3);
+                            document.getElementById("evTempText").innerText = data.temp_c;
+                            const lc = new Date(data.last_contact);
+                            document.getElementById("evLastContactText").innerText =
+                                `${String(lc.getDate()).padStart(2,'0')}.${String(lc.getMonth()+1).padStart(2,'0')} `
+                                + `${String(lc.getHours()).padStart(2,'0')}:${String(lc.getMinutes()).padStart(2,'0')}`;
+
+                            document.getElementById("deviceRunning").innerText = data.is_charging ? "Charging" : (data.work_state || "Idle");
+                            document.getElementById("deviceRunning").style.color = data.is_charging ? "green" : "gray";
+                        })
+                        .catch(() => {
+                            document.getElementById("deviceRunning").innerText = "Error";
+                        })
+                        .finally(() => {
+                            isFetchingDeviceStatus = false;
+                        });
+                    return;
+                }
+
+                // Fetch live status for Shelly devices
                 fetch(`/shellyapp/fetch-device-status/?device_id=${selectedDeviceId}`)
                     .then(response => response.json())
                     .then(data => {
@@ -495,11 +638,8 @@
                             document.getElementById("deviceRunning").innerText = data.error;
                             return;
                         }
-
                         document.getElementById("deviceStatus").innerText = data.online ? "Online" : "Offline";
                         document.getElementById("deviceRunning").innerText = data.running;
-
-                        // Color styling
                         document.getElementById("deviceStatus").style.color = data.online ? "green" : "red";
                         document.getElementById("deviceRunning").style.color = data.running === "running" ? "green" : "red";
                     })
@@ -650,7 +790,7 @@
     </div>
     {% else %}
         <div class="table-container">
-            <h2>You have no devices assigned, please set them from the Control Panel.</h2>
+            <h2>You have no devices configured. Add a Shelly or EV Charger device from the admin panel.</h2>
         </div>
     {% endif %}
 {% else %}

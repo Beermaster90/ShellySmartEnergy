@@ -13,6 +13,9 @@ from app.models import (
     ElectricityPrice,
     DeviceLog,
     DeviceAssignment,
+    EVCharger,
+    EVChargerAssignment,
+    EVChargerEnergyLog,
 )
 from app.shelly_views import toggle_device_output, fetch_device_status
 from app.services.shelly_service import (
@@ -22,7 +25,7 @@ from app.services.shelly_service import (
 )
 from app.thermostat_manager import ThermostatAssignmentManager
 from app.price_views import call_fetch_prices, get_cheapest_hours
-from .logger import log_device_event
+from .logger import log_device_event, log_ev_event
 from app.utils.time_utils import TimeUtils
 from app.utils.db_utils import with_db_retries
 import pytz
@@ -128,10 +131,13 @@ class DeviceController:
                             "ERROR"
                         )
             
+            # Fetch fresh temperatures BEFORE device processing so overheat checks use current data
+            DeviceController.fetch_thermostat_temperatures()
+
             # Execute groups in parallel (max 5 concurrent groups to be conservative)
             with ThreadPoolExecutor(max_workers=min(5, len(device_groups))) as executor:
                 futures = [executor.submit(process_device_group, group_info) for group_info in device_groups.items()]
-                
+
                 # Wait for all groups to complete
                 for future in as_completed(futures):
                     try:
@@ -143,7 +149,6 @@ class DeviceController:
                             "ERROR"
                         )
 
-            DeviceController.fetch_thermostat_temperatures()
             ThermostatAssignmentManager.apply_next_period_assignments()
                         
         except Exception as e:
@@ -243,21 +248,29 @@ class DeviceController:
                                     "INFO",
                                 )
 
-                        elif assigned and thermostat.current_temperature > max_trigger:
-                            # Max temperature override: soft-delete assignment (keep record as removed_overheat)
-                            DeviceAssignment.objects.filter(
-                                device=device,
-                                electricity_price_id__in=active_price_ids,
-                            ).exclude(assignment_type="removed_overheat").update(
-                                assignment_type="removed_overheat"
+                        elif thermostat.current_temperature > max_trigger:
+                            # Max temperature override: remove the next upcoming assignment only.
+                            # Each scheduler cycle removes one slot while temp stays high;
+                            # when temp drops the min-override will force it back on.
+                            next_assignment = (
+                                DeviceAssignment.objects.filter(
+                                    device=device,
+                                    electricity_price__start_time__gte=start_time,
+                                )
+                                .exclude(assignment_type="removed_overheat")
+                                .order_by("electricity_price__start_time")
+                                .first()
                             )
+                            if next_assignment:
+                                next_assignment.assignment_type = "removed_overheat"
+                                next_assignment.save(update_fields=["assignment_type"])
+                                log_device_event(
+                                    device,
+                                    f"Thermostat above max ({thermostat.current_temperature} > {max_trigger}). "
+                                    f"Marked period {next_assignment.electricity_price.start_time.strftime('%Y-%m-%d %H:%M')} UTC as removed_overheat.",
+                                    "INFO",
+                                )
                             assigned = False
-                            log_device_event(
-                                device,
-                                f"Thermostat above max ({thermostat.current_temperature} > {max_trigger}). "
-                                f"Overriding assignment OFF for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
-                                "INFO",
-                            )
             
             # Get initial device state (ONLY ONE STATUS CHECK)
             shelly_service = ShellyService(device.device_id)
@@ -345,6 +358,153 @@ class DeviceController:
                 device,
                 f"Device already in desired state ({action.upper()}), no action needed",
                 "INFO"
+            )
+
+    @staticmethod
+    @with_db_retries(max_attempts=3, delay=1)
+    def control_ev_chargers() -> None:
+        """Check each enabled EV charger against its price assignments and start/stop accordingly."""
+        from app.services.ev_charger_factory import get_ev_charger_service
+
+        try:
+            current_time = TimeUtils.now_utc()
+            period_start_minutes = (current_time.minute // 15) * 15
+            start_time = current_time.replace(minute=period_start_minutes, second=0, microsecond=0)
+            end_time = start_time + timedelta(minutes=14, seconds=59)
+
+            active_prices = ElectricityPrice.objects.filter(start_time__range=(start_time, end_time))
+            active_price_ids = list(active_prices.values_list("id", flat=True))
+
+            chargers = EVCharger.objects.filter(status=1)
+            if not chargers.exists():
+                return
+
+            log_device_event(
+                None,
+                f"EV charger check for period {start_time.strftime('%Y-%m-%d %H:%M')} — "
+                f"{chargers.count()} charger(s)",
+                "INFO",
+            )
+
+            for charger in chargers:
+                try:
+                    DeviceController._process_single_ev_charger(
+                        charger, active_price_ids, start_time
+                    )
+                except Exception as e:
+                    log_ev_event(charger, f"Error processing EV charger: {e}", "ERROR")
+
+        except Exception as e:
+            log_device_event(None, f"Error in control_ev_chargers: {e}", "ERROR")
+
+    @staticmethod
+    def _process_single_ev_charger(charger: EVCharger, active_price_ids: list, start_time) -> None:
+        """Control one EV charger for the current 15-minute period."""
+        from app.services.ev_charger_factory import get_ev_charger_service
+
+        assigned = EVChargerAssignment.objects.filter(
+            charger=charger,
+            electricity_price_id__in=active_price_ids,
+        ).exists()
+
+        service = get_ev_charger_service(charger)
+        status = service.get_status()
+
+        if status is None:
+            log_ev_event(charger, "Failed to fetch status from charger API", "ERROR")
+            return
+
+        # Update cached state on the model
+        charger.is_charging = status.is_charging
+        charger.work_state = status.work_state
+        charger.connection_state = status.connection_state
+        charger.power_w = status.power_w
+        charger.temp_c = status.temp_c
+        charger.session_energy_kwh = round(status.session_energy_kwh, 3)
+        charger.total_energy_kwh = round(status.total_energy_kwh, 3)
+        charger.last_contact = TimeUtils.now_utc()
+        charger.save(update_fields=[
+            "is_charging", "work_state", "connection_state", "power_w",
+            "temp_c", "session_energy_kwh", "total_energy_kwh", "last_contact", "updated_at",
+        ])
+
+        # Log energy reading
+        EVChargerEnergyLog.objects.create(
+            charger=charger,
+            session_energy_kwh=charger.session_energy_kwh,
+            total_energy_kwh=charger.total_energy_kwh,
+            is_charging=status.is_charging,
+            power_w=status.power_w,
+        )
+
+        # Back-fill energy_kwh on the PREVIOUS period's assignment.
+        # The two most recent logs bracket the previous 15-minute window.
+        try:
+            recent_logs = list(
+                EVChargerEnergyLog.objects.filter(charger=charger)
+                .order_by("-recorded_at")[:2]
+            )
+            if len(recent_logs) == 2:
+                energy_delta = max(
+                    0.0,
+                    float(recent_logs[0].total_energy_kwh) - float(recent_logs[1].total_energy_kwh),
+                )
+                prev_period_start = start_time - timedelta(minutes=15)
+                prev_period_end = start_time - timedelta(seconds=1)
+                prev_prices = ElectricityPrice.objects.filter(
+                    start_time__range=(prev_period_start, prev_period_end)
+                ).values_list("id", flat=True)
+                EVChargerAssignment.objects.filter(
+                    charger=charger,
+                    electricity_price_id__in=prev_prices,
+                    energy_kwh__isnull=True,
+                ).update(energy_kwh=round(energy_delta, 3))
+        except Exception:
+            pass  # Never let energy accounting break the control loop
+
+        # Determine if other Shelly devices belonging to this user are running this period.
+        # If so, use the reduced current to protect the fuse.
+        other_devices_running = DeviceAssignment.objects.filter(
+            user=charger.user,
+            electricity_price_id__in=active_price_ids,
+        ).exclude(assignment_type="removed_overheat").exists()
+
+        target_current = (
+            charger.charge_current_reduced_a if other_devices_running
+            else charger.charge_current_a
+        )
+        current_reason = "reduced (other devices running)" if other_devices_running else "normal"
+
+        log_ev_event(
+            charger,
+            f"Period {start_time.strftime('%Y-%m-%d %H:%M')} — "
+            f"assigned={assigned}, charging={status.is_charging}, "
+            f"target={target_current} A ({current_reason}), "
+            f"state={status.work_state}, session={charger.session_energy_kwh} kWh",
+            "INFO",
+        )
+
+        if assigned and not status.is_charging:
+            ok = service.start_charging(target_current)
+            log_ev_event(
+                charger,
+                f"Started charging at {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
+                "INFO" if ok else "ERROR",
+            )
+        elif assigned and status.is_charging:
+            # Already charging — adjust current every cycle so it reacts to devices turning on/off
+            ok = service.set_charge_current(target_current)
+            log_ev_event(
+                charger,
+                f"Current set to {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
+                "INFO" if ok else "ERROR",
+            )
+        elif not assigned and status.is_charging:
+            ok = service.stop_charging()
+            log_ev_event(
+                charger,
+                f"Stopped charging — {'OK' if ok else 'FAILED'}",
+                "INFO" if ok else "ERROR",
             )
 
     @staticmethod

@@ -9,6 +9,8 @@ from .models import (
     DeviceAssignment,
     AppSetting,
     UserProfile,
+    EVCharger,
+    EVChargerAssignment,
 )
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from app.utils.time_utils import TimeUtils
@@ -311,6 +313,7 @@ class DeviceAssignmentAdmin(admin.ModelAdmin):
         "device",
         "get_start_time_local",
         "get_end_time_local",
+        "energy_kwh",
         "get_assigned_at_user_tz",
     )
     search_fields = (
@@ -451,6 +454,139 @@ class DeviceAssignmentAdmin(admin.ModelAdmin):
 admin.site.register(DeviceAssignment, DeviceAssignmentAdmin)
 
 admin.site.register(AppSetting)
+
+
+### EV CHARGER ADMIN ###
+class EVChargerAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "familiar_name",
+        "backend",
+        "charge_current_a",
+        "charge_current_reduced_a",
+        "run_hours_per_day",
+        "day_transfer_price",
+        "night_transfer_price",
+        "auto_assign_price_threshold",
+        "get_automation_status",
+        "is_charging",
+        "work_state",
+        "connection_state",
+        "temp_c",
+        "session_energy_kwh",
+        "total_energy_kwh",
+        "last_contact",
+        "user",
+        "created_at",
+    )
+    search_fields = ("familiar_name",)
+    readonly_fields = ("id", "created_at", "updated_at", "is_charging", "work_state",
+                       "connection_state", "power_w", "temp_c", "session_energy_kwh",
+                       "total_energy_kwh", "last_contact")
+    fields = (
+        "id", "familiar_name", "user", "backend",
+        "tuya_client_id", "tuya_client_secret", "tuya_device_id", "tuya_base_url",
+        "charge_current_a", "charge_current_reduced_a", "run_hours_per_day",
+        "day_transfer_price", "night_transfer_price", "auto_assign_price_threshold",
+        "status",
+        "is_charging", "work_state", "connection_state", "power_w",
+        "temp_c", "session_energy_kwh", "total_energy_kwh", "last_contact",
+        "created_at", "updated_at",
+    )
+    ordering = ["-id"]
+    formfield_overrides = {
+        models.DecimalField: {
+            "localize": False,
+            "widget": forms.NumberInput(attrs={"step": "0.1"}),
+        },
+    }
+
+    def get_automation_status(self, obj):
+        return "Enabled" if obj.status == 1 else "Disabled"
+    get_automation_status.short_description = "Automation"
+    get_automation_status.admin_order_field = "status"
+
+    def save_model(self, request, obj, form, change):
+        if not change and not request.user.is_superuser:
+            obj.user = request.user
+        super().save_model(request, obj, form, change)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs if request.user.is_superuser else qs.filter(user=request.user)
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "user":
+            if request.user.is_superuser:
+                kwargs["queryset"] = User.objects.all()
+            else:
+                kwargs["queryset"] = User.objects.filter(id=request.user.id)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+
+admin.site.register(EVCharger, EVChargerAdmin)
+
+
+### EV CHARGER ASSIGNMENT ADMIN ###
+class EVChargerAssignmentAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "charger",
+        "get_start_time_local",
+        "get_end_time_local",
+        "assignment_type",
+        "energy_kwh",
+        "assigned_at",
+    )
+    search_fields = ("user__username", "charger__familiar_name")
+    list_filter = ("user", "charger", "assignment_type")
+    ordering = ("-assigned_at",)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs if request.user.is_superuser else qs.filter(user=request.user)
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "charger" and not request.user.is_superuser:
+            kwargs["queryset"] = EVCharger.objects.filter(user=request.user)
+        if db_field.name == "user":
+            if request.user.is_superuser:
+                kwargs["queryset"] = User.objects.all()
+            else:
+                kwargs["queryset"] = User.objects.filter(id=request.user.id)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def save_model(self, request, obj, form, change):
+        if not request.user.is_superuser:
+            obj.user = request.user
+        super().save_model(request, obj, form, change)
+
+    def get_start_time_local(self, obj):
+        request = getattr(self, "_current_request", None)
+        if request and hasattr(request, "user"):
+            return TimeUtils.format_datetime_with_tz(obj.electricity_price.start_time, request.user)
+        helsinki_tz = pytz.timezone("Europe/Helsinki")
+        return obj.electricity_price.start_time.astimezone(helsinki_tz).strftime("%Y-%m-%d %H:%M %Z")
+    get_start_time_local.short_description = "Start Time"
+
+    def get_end_time_local(self, obj):
+        request = getattr(self, "_current_request", None)
+        if request and hasattr(request, "user"):
+            return TimeUtils.format_datetime_with_tz(obj.electricity_price.end_time, request.user)
+        helsinki_tz = pytz.timezone("Europe/Helsinki")
+        return obj.electricity_price.end_time.astimezone(helsinki_tz).strftime("%Y-%m-%d %H:%M %Z")
+    get_end_time_local.short_description = "End Time"
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        self._current_request = request
+        return super().changeform_view(request, object_id, form_url, extra_context)
+
+    def changelist_view(self, request, extra_context=None):
+        self._current_request = request
+        return super().changelist_view(request, extra_context)
+
+
+admin.site.register(EVChargerAssignment, EVChargerAssignmentAdmin)
 
 
 ### USER PROFILE ADMIN ###

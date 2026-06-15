@@ -39,6 +39,15 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # EV charger control runs at the same 15-minute marks as Shelly devices
+    scheduler.add_job(
+        DeviceController.control_ev_chargers,
+        trigger=CronTrigger(minute="15,30,45"),
+        id="control_ev_chargers",
+        max_instances=1,
+        replace_existing=True,
+    )
+
     # Run thermostat assignments at the top of the hour to cover the 15-past slot.
     scheduler.add_job(
         ThermostatAssignmentManager.apply_next_period_assignments,

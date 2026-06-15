@@ -1,42 +1,86 @@
 {% extends "app/layout.html" %}
 {% block content %}
 <h2>Admin Test Page</h2>
+
+<h3>Fetch Electricity Prices</h3>
 <form method="post">
     {% csrf_token %}
-    <button type="submit" name="action" value="fetch_prices">Fetch Prices</button>
+    <button type="submit" name="action" value="fetch_prices" class="btn btn-default">Fetch Prices</button>
 </form>
 <hr>
-<h3>Get Device Status</h3>
-<form method="post">
+
+<h3>Shelly — Get Device Status</h3>
+<form method="post" class="form-inline">
     {% csrf_token %}
-    <select name="device_id">
+    <select name="device_id" class="form-control" style="margin-right:8px;">
         {% for device in devices %}
             <option value="{{ device.device_id }}">{{ device.familiar_name }}</option>
         {% endfor %}
     </select>
-    <button type="submit" name="action" value="get_status">Get Status</button>
+    <button type="submit" name="action" value="get_status" class="btn btn-default">Get Status</button>
 </form>
 <hr>
-<h3>Run 15-Minute Schedule</h3>
+
+<h3>Shelly — Run 15-Minute Schedule</h3>
 <form method="post">
     {% csrf_token %}
-    <button type="submit" name="action" value="run_schedule">Run Now</button>
+    <button type="submit" name="action" value="run_schedule" class="btn btn-default">Run Now</button>
 </form>
 <hr>
-<h3>Assign Cheapest Hours to Device (Override 24h check)</h3>
-<form method="post">
+
+<h3>Shelly — Assign Cheapest Hours (Override 24h check)</h3>
+<form method="post" class="form-inline">
     {% csrf_token %}
-    <select name="cheapest_device_id">
+    <select name="cheapest_device_id" class="form-control" style="margin-right:8px;">
         {% for device in devices %}
             <option value="{{ device.device_id }}">{{ device.familiar_name }}</option>
         {% endfor %}
     </select>
-    <button type="submit" name="action" value="assign_cheapest_hours">Assign Cheapest Hours</button>
+    <button type="submit" name="action" value="assign_cheapest_hours" class="btn btn-default">Assign Cheapest Hours</button>
 </form>
 <hr>
+
+{% if ev_chargers %}
+<h3>EV Charger — Assign Cheapest Hours (Override 24h check)</h3>
+<form method="post" class="form-inline">
+    {% csrf_token %}
+    <select name="ev_charger_id" class="form-control" style="margin-right:8px;">
+        {% for charger in ev_chargers %}
+            <option value="{{ charger.id }}">{{ charger.familiar_name }}</option>
+        {% endfor %}
+    </select>
+    <button type="submit" name="action" value="ev_assign_cheapest_hours" class="btn btn-default">Assign Cheapest Hours</button>
+</form>
+<hr>
+
+<h3>EV Charger — Controls</h3>
+<p class="text-muted small">Charger selector and current apply to all EV actions below.</p>
+
+<form method="post" id="evForm">
+    {% csrf_token %}
+    <div class="form-group" style="margin-bottom:12px;">
+        <label>Charger:</label>
+        <select name="ev_charger_id" class="form-control" style="display:inline-block;width:auto;margin:0 8px;">
+            {% for charger in ev_chargers %}
+                <option value="{{ charger.id }}">{{ charger.familiar_name }}</option>
+            {% endfor %}
+        </select>
+        &nbsp;
+        <label>Current (A):</label>
+        <input name="ev_current_a" type="number" class="form-control" style="display:inline-block;width:80px;margin:0 8px;" value="6" min="1" max="32">
+    </div>
+    <button type="submit" name="action" value="ev_get_status" class="btn btn-info" style="margin-right:6px;">Get Status</button>
+    <button type="submit" name="action" value="ev_start_charging" class="btn btn-success" style="margin-right:6px;">Start Charging</button>
+    <button type="submit" name="action" value="ev_stop_charging" class="btn btn-danger" style="margin-right:6px;">Stop Charging</button>
+    <button type="submit" name="action" value="ev_set_current" class="btn btn-warning" style="margin-right:6px;">Set Current</button>
+    <button type="submit" name="action" value="ev_run_schedule" class="btn btn-default">Run EV Schedule</button>
+</form>
+<hr>
+{% endif %}
+
 {% if result %}
     <h4>Result:</h4>
-    <pre>{{ result|safe }}</pre>
+    <pre style="background:#f8f8f8;padding:12px;border:1px solid #ddd;border-radius:4px;">{{ result|safe }}</pre>
 {% endif %}
 {% if assigned_hours %}
     <h4>Assigned Hours:</h4>
@@ -46,4 +90,5 @@
         {% endfor %}
     </ul>
 {% endif %}
+
 {% endblock %}

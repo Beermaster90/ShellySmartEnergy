@@ -1,6 +1,6 @@
 from datetime import timedelta
 from django.utils import timezone
-from .models import DeviceAssignment, ElectricityPrice
+from .models import DeviceAssignment, EVChargerAssignment, ElectricityPrice
 import datetime
 from app.utils.time_utils import TimeUtils
 from django.utils.timezone import now
@@ -78,4 +78,40 @@ class DeviceAssignmentManager:
             user=self.user,
             device=device,
             electricity_price__start_time__range=(current_time, end_time)
+        )
+
+
+class EVChargerAssignmentManager:
+    def __init__(self, user):
+        self.user = user
+
+    def get_charger_cheapest_hours(self, chargers):
+        """Attach cheapest_hours list to each EVCharger in the next 24 h."""
+        now_utc = TimeUtils.now_utc()
+        next_24h = now_utc + timedelta(hours=24)
+        assignments = EVChargerAssignment.objects.filter(
+            user=self.user,
+            charger__in=chargers,
+            electricity_price__start_time__gte=now_utc,
+            electricity_price__start_time__lt=next_24h,
+        ).select_related("electricity_price")
+
+        charger_hours = {}
+        for a in assignments:
+            charger_hours.setdefault(a.charger_id, []).append(
+                a.electricity_price.start_time.strftime("%H:%M")
+            )
+
+        for charger in chargers:
+            charger.cheapest_hours = charger_hours.get(charger.id, [])
+
+        return chargers
+
+    def get_assignments_next_24h(self, charger):
+        current_time = now()
+        end_time = current_time + timedelta(hours=24)
+        return EVChargerAssignment.objects.filter(
+            user=self.user,
+            charger=charger,
+            electricity_price__start_time__range=(current_time, end_time),
         )

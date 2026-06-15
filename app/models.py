@@ -198,6 +198,117 @@ class TemperatureReading(models.Model):
         return f"{self.thermostat.familiar_name} at {self.recorded_at}: {self.temperature_c} C"
 
 
+class EVCharger(models.Model):
+    BACKEND_CHOICES = [("tuya", "Tuya IoT Platform")]
+
+    id = models.AutoField(primary_key=True)
+    familiar_name = models.CharField(max_length=255)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    backend = models.CharField(max_length=50, choices=BACKEND_CHOICES, default="tuya")
+
+    # Tuya cloud credentials
+    tuya_client_id = models.CharField(max_length=255, blank=True, default="")
+    tuya_client_secret = models.CharField(max_length=255, blank=True, default="")
+    tuya_device_id = models.CharField(max_length=255, blank=True, default="")
+    tuya_base_url = models.URLField(
+        max_length=512,
+        default="https://openapi.tuyaeu.com",
+        help_text="Regional Tuya OpenAPI URL (e.g. https://openapi.tuyaeu.com for Europe)",
+    )
+
+    # Charging settings
+    charge_current_a = models.IntegerField(
+        default=6, help_text="Normal charging current in amperes (1-32 A)"
+    )
+    charge_current_reduced_a = models.IntegerField(
+        default=3,
+        help_text="Reduced charging current used when other high-power devices are running, to protect fuses (1-32 A)",
+    )
+    run_hours_per_day = models.IntegerField(
+        default=0, help_text="Hours to charge per day (0 = no automatic scheduling)"
+    )
+    day_transfer_price = models.DecimalField(
+        max_digits=6, decimal_places=1, default=0,
+        help_text="Day-time transfer price (c/kWh, 07:00-21:59)",
+    )
+    night_transfer_price = models.DecimalField(
+        max_digits=6, decimal_places=1, default=0,
+        help_text="Night-time transfer price (c/kWh, 22:00-06:59)",
+    )
+    auto_assign_price_threshold = models.DecimalField(
+        max_digits=6, decimal_places=1, default=0,
+        help_text="Always assign periods at or below this total price (c/kWh, 0 = disabled)",
+    )
+    status = models.IntegerField(default=1, help_text="1 = automation enabled, 0 = disabled")
+
+    # Cached live state — refreshed every 15 minutes by the scheduler
+    is_charging = models.BooleanField(default=False)
+    work_state = models.CharField(max_length=64, blank=True, default="")
+    connection_state = models.CharField(max_length=64, blank=True, default="")
+    power_w = models.IntegerField(default=0)
+    temp_c = models.IntegerField(default=0)
+    session_energy_kwh = models.DecimalField(max_digits=8, decimal_places=3, default=0)
+    total_energy_kwh = models.DecimalField(max_digits=10, decimal_places=3, default=0)
+    last_contact = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.familiar_name
+
+    class Meta:
+        verbose_name = "EV Charger"
+        verbose_name_plural = "EV Chargers"
+
+
+class EVChargerAssignment(models.Model):
+    ASSIGNMENT_TYPES = [
+        ("cheapest", "Cheapest Hours"),
+        ("threshold", "Price Threshold"),
+        ("manual", "Manual"),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    charger = models.ForeignKey(EVCharger, on_delete=models.CASCADE)
+    electricity_price = models.ForeignKey(ElectricityPrice, on_delete=models.CASCADE)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    assignment_type = models.CharField(
+        max_length=20, choices=ASSIGNMENT_TYPES, default="cheapest",
+        help_text="Reason this period was assigned",
+    )
+    energy_kwh = models.DecimalField(
+        max_digits=8, decimal_places=3, null=True, blank=True,
+        help_text="Energy used during this period (kWh), filled in by scheduler after the period ends",
+    )
+
+    def __str__(self):
+        return (
+            f"{self.charger.familiar_name} assigned at "
+            f"{self.electricity_price.start_time} by {self.user.username}"
+        )
+
+    class Meta:
+        verbose_name = "EV Charger Assignment"
+        verbose_name_plural = "EV Charger Assignments"
+
+
+class EVChargerEnergyLog(models.Model):
+    charger = models.ForeignKey(EVCharger, on_delete=models.CASCADE, related_name="energy_logs")
+    recorded_at = models.DateTimeField(default=TimeUtils.now_utc)
+    session_energy_kwh = models.DecimalField(max_digits=8, decimal_places=3, default=0)
+    total_energy_kwh = models.DecimalField(max_digits=10, decimal_places=3, default=0)
+    is_charging = models.BooleanField(default=False)
+    power_w = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.charger.familiar_name} at {self.recorded_at}: {self.session_energy_kwh} kWh"
+
+    class Meta:
+        verbose_name = "EV Charger Energy Log"
+        verbose_name_plural = "EV Charger Energy Logs"
+
+
 class DeviceLog(models.Model):
     STATUS_CHOICES = [
         ("INFO", "Info"),
@@ -208,15 +319,26 @@ class DeviceLog(models.Model):
     device = models.ForeignKey(
         "ShellyDevice",
         on_delete=models.CASCADE,
-        null=True,  # Allow NULL values
-        blank=True,  # Allow empty values in forms
+        null=True,
+        blank=True,
+    )
+    ev_charger = models.ForeignKey(
+        "EVCharger",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="logs",
     )
     message = models.TextField()
     status = models.CharField(max_length=5, choices=STATUS_CHOICES, default="INFO")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Log for {self.device.familiar_name if self.device else 'System'} - {self.status}"
+        if self.device:
+            return f"Log for {self.device.familiar_name} - {self.status}"
+        if self.ev_charger:
+            return f"Log for [EV] {self.ev_charger.familiar_name} - {self.status}"
+        return f"System log - {self.status}"
 
 
 class DeviceAssignment(models.Model):
@@ -237,6 +359,10 @@ class DeviceAssignment(models.Model):
         choices=ASSIGNMENT_TYPES,
         default="cheapest",
         help_text="Reason this period was assigned",
+    )
+    energy_kwh = models.DecimalField(
+        max_digits=8, decimal_places=3, null=True, blank=True,
+        help_text="Energy used during this period (kWh), reserved for future use",
     )
 
     def __str__(self):
@@ -316,6 +442,16 @@ def create_or_update_user_profile_and_group(sender, instance, created, **kwargs)
         "delete_deviceassignment",
         # ElectricityPrice permissions
         "view_electricityprice",
+        # EVCharger permissions
+        "view_evcharger",
+        "change_evcharger",
+        "add_evcharger",
+        "delete_evcharger",
+        # EVChargerAssignment permissions
+        "view_evchargerassignment",
+        "change_evchargerassignment",
+        "add_evchargerassignment",
+        "delete_evchargerassignment",
     ]
 
     group, _ = Group.objects.get_or_create(name="commoneers")
@@ -326,6 +462,8 @@ def create_or_update_user_profile_and_group(sender, instance, created, **kwargs)
         ContentType.objects.get(app_label="app", model="shellytemperature"),
         ContentType.objects.get(app_label="app", model="deviceassignment"),
         ContentType.objects.get(app_label="app", model="electricityprice"),
+        ContentType.objects.get(app_label="app", model="evcharger"),
+        ContentType.objects.get(app_label="app", model="evchargerassignment"),
     ]
     perms = Permission.objects.filter(content_type__in=model_cts, codename__in=required_perms)
     group.permissions.set(perms)

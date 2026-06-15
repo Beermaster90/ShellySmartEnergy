@@ -2,11 +2,12 @@ from datetime import datetime, timedelta
 from django.shortcuts import render
 from django.http import HttpRequest, JsonResponse
 from django.contrib.auth.decorators import login_required
+from django.db import models
 from django.contrib.auth.views import LoginView
 from django.utils import timezone
-from .models import ElectricityPrice, ShellyDevice, DeviceLog, DeviceAssignment
+from .models import ElectricityPrice, ShellyDevice, DeviceLog, DeviceAssignment, EVCharger, EVChargerAssignment
 from .price_views import get_cheapest_hours
-from .device_assignment_manager import DeviceAssignmentManager
+from .device_assignment_manager import DeviceAssignmentManager, EVChargerAssignmentManager
 from app.utils.time_utils import TimeUtils
 from typing import Dict, Any
 from django.contrib.auth.models import User
@@ -106,15 +107,13 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
 
         if selected_user_id:
             selected_user = User.objects.filter(id=selected_user_id).first()
-        
+
         # If no user selected or invalid user, default to first user with assigned devices
         if not selected_user:
-            # Try to find first user with device assignments
             for user in users:
                 if DeviceAssignment.objects.filter(user=user).exists():
                     selected_user = user
                     break
-            # If no user has assignments, use first user or request.user
             if not selected_user:
                 selected_user = users.first() or request.user
 
@@ -122,61 +121,81 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
         assignments = DeviceAssignment.objects.select_related(
             "device", "electricity_price"
         ).filter(user=selected_user)
+        ev_chargers = EVCharger.objects.filter(user=selected_user)
+        ev_assignments = EVChargerAssignment.objects.select_related(
+            "charger", "electricity_price"
+        ).filter(user=selected_user)
     else:
         devices = ShellyDevice.objects.filter(user=request.user).select_related("thermostat_device")
         assignments = DeviceAssignment.objects.filter(user=request.user)
-    selected_device = devices.first()
+        ev_chargers = EVCharger.objects.filter(user=request.user)
+        ev_assignments = EVChargerAssignment.objects.select_related(
+            "charger", "electricity_price"
+        ).filter(user=request.user)
 
-    selected_device_id = request.GET.get("device_id")
-    if selected_device_id:
-        selected_device = devices.filter(device_id=selected_device_id).first()
+    selected_device = devices.first()
+    selected_ev_charger = None
+
+    raw_device_id = request.GET.get("device_id", "")
+    if str(raw_device_id).startswith("ev_"):
+        ev_id = int(raw_device_id[3:])
+        selected_ev_charger = ev_chargers.filter(id=ev_id).first()
+        selected_device = None
+    elif raw_device_id:
+        selected_device = devices.filter(device_id=raw_device_id).first()
 
     day_transfer_price = selected_device.day_transfer_price if selected_device else 0
-    night_transfer_price = (
-        selected_device.night_transfer_price if selected_device else 0
-    )
+    night_transfer_price = selected_device.night_transfer_price if selected_device else 0
     hours_needed = selected_device.run_hours_per_day if selected_device else 0
 
-    # Build maps of price_id -> device_ids (active, forced_min, and removed_overheat)
+    # Build maps of price_id -> device keys (Shelly: "N", EV: "ev_N")
     assigned_devices_map = {}
     forced_devices_map = {}
     removed_overheat_map = {}
     for assignment in assignments:
         price_id = assignment.electricity_price.id
-        device_id = str(assignment.device.device_id)
+        device_key = str(assignment.device.device_id)
         if assignment.assignment_type == "removed_overheat":
-            removed_overheat_map.setdefault(price_id, []).append(device_id)
+            removed_overheat_map.setdefault(price_id, []).append(device_key)
         else:
-            assigned_devices_map.setdefault(price_id, []).append(device_id)
+            assigned_devices_map.setdefault(price_id, []).append(device_key)
             if assignment.assignment_type == "forced_min":
-                forced_devices_map.setdefault(price_id, []).append(device_id)
+                forced_devices_map.setdefault(price_id, []).append(device_key)
+
+    for ev_assignment in ev_assignments:
+        price_id = ev_assignment.electricity_price.id
+        charger_key = f"ev_{ev_assignment.charger.id}"
+        assigned_devices_map.setdefault(price_id, []).append(charger_key)
 
     for price in prices:
         price["assigned_devices"] = ",".join(assigned_devices_map.get(price["id"], []))
         price["forced_devices"] = ",".join(forced_devices_map.get(price["id"], []))
         price["removed_overheat_devices"] = ",".join(removed_overheat_map.get(price["id"], []))
-        # Convert UTC time to user's timezone for hour comparison
         price_user_tz = TimeUtils.to_user_timezone(price["start_time"], request.user)
-        # Store both hour and 15-minute period information
         price["hour"] = str(price_user_tz.hour)
-        price["time_key"] = f"{price_user_tz.hour:02d}:{price_user_tz.minute:02d}"  # Format: "HH:MM"
+        price["time_key"] = f"{price_user_tz.hour:02d}:{price_user_tz.minute:02d}"
         price["start_time"] = price["start_time"].isoformat()
         price["end_time"] = price["end_time"].isoformat()
 
     assignment_manager = DeviceAssignmentManager(request.user)
     devices = assignment_manager.get_device_cheapest_hours(devices)
-    # Round to nearest 15 minutes for current_time_key
+
+    ev_assignment_manager = EVChargerAssignmentManager(request.user)
+    ev_chargers = ev_assignment_manager.get_charger_cheapest_hours(ev_chargers)
+
     rounded_minutes = (now_user_tz.minute // 15) * 15
-    current_time_key = f"{now_user_tz.hour:02d}:{rounded_minutes:02d}"  # Format: "HH:MM"
-    current_time = now_utc.strftime("%Y-%m-%d %H:%M")  # Keep full timestamp in UTC
+    current_time_key = f"{now_user_tz.hour:02d}:{rounded_minutes:02d}"
+    current_time = now_utc.strftime("%Y-%m-%d %H:%M")
     user_timezone_name = TimeUtils.get_user_timezone_name(request.user)
 
     return {
         "prices": prices,
         "devices": devices,
+        "ev_chargers": ev_chargers,
         "users": users,
         "selected_user": selected_user,
         "selected_device": selected_device,
+        "selected_ev_charger": selected_ev_charger,
         "day_transfer_price": day_transfer_price,
         "night_transfer_price": night_transfer_price,
         "hours_needed": hours_needed,
@@ -212,31 +231,42 @@ def about(request: HttpRequest):
 
     # Device selection
     shelly_devices = ShellyDevice.objects.filter(user=selected_user).order_by("familiar_name")
+    ev_charger_devices = EVCharger.objects.filter(user=selected_user).order_by("familiar_name")
     selected_device_id = request.GET.get("device_id", "")
 
     # Base queryset
     if selected_device_id == "system":
-        # System logs have no device — only admins can view these
-        logs = DeviceLog.objects.filter(device__isnull=True)
+        logs = DeviceLog.objects.filter(device__isnull=True, ev_charger__isnull=True)
+    elif str(selected_device_id).startswith("ev_"):
+        ev_id = int(selected_device_id[3:])
+        logs = DeviceLog.objects.filter(ev_charger__id=ev_id, ev_charger__user=selected_user)
     elif selected_device_id:
         logs = DeviceLog.objects.filter(device__device_id=selected_device_id, device__user=selected_user)
     elif request.user.is_superuser and not request.GET.get("user_id"):
         logs = DeviceLog.objects.all()
     else:
-        logs = DeviceLog.objects.filter(device__user=selected_user)
+        logs = DeviceLog.objects.filter(
+            models.Q(device__user=selected_user) | models.Q(ev_charger__user=selected_user)
+        )
 
     # Status filter
     status_filter = request.GET.get("status", "")
     if status_filter:
         logs = logs.filter(status=status_filter)
 
-    logs = logs.select_related("device").order_by("-created_at")[:500]
+    logs = logs.select_related("device", "ev_charger").order_by("-created_at")[:500]
 
     user_timezone_name = TimeUtils.get_user_timezone_name(request.user)
     user_tz = TimeUtils.get_user_timezone(request.user)
     for log in logs:
         local_dt = log.created_at.astimezone(user_tz)
         log.created_at_local = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+        if log.device:
+            log.device_display_name = log.device.familiar_name
+        elif log.ev_charger:
+            log.device_display_name = f"[EV] {log.ev_charger.familiar_name}"
+        else:
+            log.device_display_name = "System"
 
     return render(
         request,
@@ -249,6 +279,7 @@ def about(request: HttpRequest):
             "users": users,
             "selected_user": selected_user,
             "shelly_devices": shelly_devices,
+            "ev_charger_devices": ev_charger_devices,
             "selected_device_id": selected_device_id,
             "status_filter": status_filter,
             "version": get_version_info(),
@@ -276,6 +307,7 @@ def admin_test_page(request: HttpRequest):
     result = None
     assigned_hours = None
     devices = ShellyDevice.objects.all()
+    ev_chargers = EVCharger.objects.all()
     prices = ElectricityPrice.objects.order_by("start_time")[:48]  # Show next 48 hours
     time_format = request.POST.get("time_format", "utc")
     local_tz = pytz.timezone("Europe/Helsinki")
@@ -386,11 +418,130 @@ def admin_test_page(request: HttpRequest):
                 result = f"Assigned {assigned_count} cheapest hours to {device.familiar_name} for user {device.user.username} (override 24h check)"
             else:
                 result = "Invalid device selection for cheapest hours assignment."
+
+        elif action == "ev_assign_cheapest_hours":
+            charger_id = request.POST.get("ev_charger_id", "").strip() or None
+            charger = ev_chargers.filter(id=charger_id).first()
+            if charger:
+                now_utc = TimeUtils.now_utc()
+                prices_list = list(
+                    ElectricityPrice.objects.filter(start_time__gte=now_utc)
+                    .order_by("start_time")
+                    .values("start_time", "price_kwh", "id")
+                )
+                cheapest_hours = get_cheapest_hours(
+                    prices_list,
+                    charger.day_transfer_price,
+                    charger.night_transfer_price,
+                    charger.run_hours_per_day,
+                    charger.auto_assign_price_threshold,
+                    local_tz,
+                )
+                assigned_count = 0
+                for hour in cheapest_hours:
+                    price_entry = next(
+                        (
+                            p for p in prices_list
+                            if TimeUtils.to_utc(p["start_time"]).strftime("%Y-%m-%d %H:%M")
+                            == hour.strftime("%Y-%m-%d %H:%M")
+                        ),
+                        None,
+                    )
+                    if price_entry:
+                        _, created = EVChargerAssignment.objects.get_or_create(
+                            user=charger.user,
+                            charger=charger,
+                            electricity_price_id=price_entry["id"],
+                        )
+                        if created:
+                            assigned_count += 1
+                result = f"Assigned {assigned_count} cheapest hours to {charger.familiar_name} (override 24h check)"
+            else:
+                result = "Invalid EV charger selection."
+
+        # --- EV Charger actions ---
+        elif action == "ev_get_status":
+            from app.services.ev_charger_factory import get_ev_charger_service
+            import json as _json
+            charger_id = request.POST.get("ev_charger_id", "").strip() or None
+            charger = ev_chargers.filter(id=charger_id).first()
+            if charger:
+                try:
+                    service = get_ev_charger_service(charger)
+                    status = service.get_status()
+                    if status:
+                        result = _json.dumps({
+                            "charger": charger.familiar_name,
+                            "is_charging": status.is_charging,
+                            "work_state": status.work_state,
+                            "connection_state": status.connection_state,
+                            "power_w": status.power_w,
+                            "temp_c": status.temp_c,
+                            "session_energy_kwh": status.session_energy_kwh,
+                            "total_energy_kwh": status.total_energy_kwh,
+                        }, indent=2)
+                    else:
+                        result = f"ERROR: get_status() returned None for {charger.familiar_name}"
+                except Exception as e:
+                    result = f"ERROR: {e}"
+            else:
+                result = "Invalid EV charger selection."
+
+        elif action == "ev_start_charging":
+            from app.services.ev_charger_factory import get_ev_charger_service
+            charger_id = request.POST.get("ev_charger_id", "").strip() or None
+            current_a = int(request.POST.get("ev_current_a", 6))
+            charger = ev_chargers.filter(id=charger_id).first()
+            if charger:
+                try:
+                    ok = get_ev_charger_service(charger).start_charging(current_a)
+                    result = f"start_charging({current_a} A) → {'OK' if ok else 'FAILED'}"
+                except Exception as e:
+                    result = f"ERROR: {e}"
+            else:
+                result = "Invalid EV charger selection."
+
+        elif action == "ev_stop_charging":
+            from app.services.ev_charger_factory import get_ev_charger_service
+            charger_id = request.POST.get("ev_charger_id", "").strip() or None
+            charger = ev_chargers.filter(id=charger_id).first()
+            if charger:
+                try:
+                    ok = get_ev_charger_service(charger).stop_charging()
+                    result = f"stop_charging() → {'OK' if ok else 'FAILED'}"
+                except Exception as e:
+                    result = f"ERROR: {e}"
+            else:
+                result = "Invalid EV charger selection."
+
+        elif action == "ev_set_current":
+            from app.services.ev_charger_factory import get_ev_charger_service
+            charger_id = request.POST.get("ev_charger_id", "").strip() or None
+            current_a = int(request.POST.get("ev_current_a", 6))
+            charger = ev_chargers.filter(id=charger_id).first()
+            if charger:
+                try:
+                    ok = get_ev_charger_service(charger).set_charge_current(current_a)
+                    result = f"set_charge_current({current_a} A) → {'OK' if ok else 'FAILED'}"
+                except Exception as e:
+                    result = f"ERROR: {e}"
+            else:
+                result = "Invalid EV charger selection."
+
+        elif action == "ev_run_schedule":
+            from app.tasks import DeviceController
+            try:
+                DeviceController.control_ev_chargers()
+                result = "EV charger schedule executed."
+            except Exception as e:
+                result = f"ERROR running EV charger schedule: {e}"
+
     return render(
         request,
         "app/admin_test_page.html",
         {
             "devices": devices,
+            "ev_chargers": ev_chargers,
             "prices": prices,
             "result": result,
             "assigned_hours": assigned_hours,
@@ -423,66 +574,78 @@ def toggle_device_assignment(request):
         if not device_id or not price_id:
             return JsonResponse({"success": False, "error": "Missing device_id or price_id"})
         
-        # Get the device - admins can access any device, regular users only their own
-        try:
-            if request.user.is_staff or request.user.is_superuser:
-                # Admins can access any device
-                device = ShellyDevice.objects.get(device_id=device_id)
-            else:
-                # Regular users can only access their own devices
-                device = ShellyDevice.objects.get(device_id=device_id, user=request.user)
-        except ShellyDevice.DoesNotExist:
-            return JsonResponse({"success": False, "error": "Device not found or access denied"})
-        
-        # Check if device automation is enabled
-        if device.status != 1:
-            return JsonResponse({"success": False, "error": "Device automation is disabled. Enable it first to manage assignments."})
-        
-        # Get the electricity price
+        is_ev = str(device_id).startswith("ev_")
+
         try:
             electricity_price = ElectricityPrice.objects.get(id=price_id)
         except ElectricityPrice.DoesNotExist:
             return JsonResponse({"success": False, "error": "Electricity price not found"})
-        
-        # Determine which user the assignment belongs to
-        # Admins manage assignments for the device owner, regular users for themselves
+
+        if is_ev:
+            ev_id = int(str(device_id)[3:])
+            try:
+                if request.user.is_staff or request.user.is_superuser:
+                    charger = EVCharger.objects.get(id=ev_id)
+                else:
+                    charger = EVCharger.objects.get(id=ev_id, user=request.user)
+            except EVCharger.DoesNotExist:
+                return JsonResponse({"success": False, "error": "EV Charger not found or access denied"})
+
+            if charger.status != 1:
+                return JsonResponse({"success": False, "error": "EV Charger automation is disabled."})
+
+            assignment_user = charger.user if (request.user.is_staff or request.user.is_superuser) else request.user
+            assignment = EVChargerAssignment.objects.filter(
+                user=assignment_user, charger=charger, electricity_price=electricity_price
+            ).first()
+
+            if assignment:
+                assignment.delete()
+                action, assigned = "unassigned", False
+            else:
+                EVChargerAssignment.objects.create(
+                    user=assignment_user, charger=charger,
+                    electricity_price=electricity_price, assignment_type="manual",
+                )
+                action, assigned = "assigned", True
+
+            message = f"EV Charger {charger.familiar_name} {action} at {TimeUtils.format_datetime_with_tz(electricity_price.start_time, request.user, '%H:%M')}"
+            return JsonResponse({"success": True, "action": action, "assigned": assigned, "message": message})
+
+        # --- Shelly device ---
+        try:
+            if request.user.is_staff or request.user.is_superuser:
+                device = ShellyDevice.objects.get(device_id=device_id)
+            else:
+                device = ShellyDevice.objects.get(device_id=device_id, user=request.user)
+        except ShellyDevice.DoesNotExist:
+            return JsonResponse({"success": False, "error": "Device not found or access denied"})
+
+        if device.status != 1:
+            return JsonResponse({"success": False, "error": "Device automation is disabled. Enable it first to manage assignments."})
+
         assignment_user = device.user if (request.user.is_staff or request.user.is_superuser) else request.user
-        
-        # Check if assignment already exists for the correct user
+
         assignment = DeviceAssignment.objects.filter(
-            user=assignment_user,
-            device=device,
-            electricity_price=electricity_price
+            user=assignment_user, device=device, electricity_price=electricity_price
         ).first()
-        
+
         if assignment:
-            # Unassign - delete the assignment
             assignment.delete()
-            action = "unassigned"
-            assigned = False
+            action, assigned = "unassigned", False
         else:
-            # Assign - create new assignment for the correct user
             DeviceAssignment.objects.create(
-                user=assignment_user,
-                device=device,
-                electricity_price=electricity_price,
-                assignment_type="manual",
+                user=assignment_user, device=device,
+                electricity_price=electricity_price, assignment_type="manual",
             )
-            action = "assigned"
-            assigned = True
-        
-        # Create appropriate message based on who is making the change
+            action, assigned = "assigned", True
+
         if (request.user.is_staff or request.user.is_superuser) and assignment_user != request.user:
             message = f"Device {device.familiar_name} {action} for {assignment_user.username} at {TimeUtils.format_datetime_with_tz(electricity_price.start_time, request.user, '%H:%M')}"
         else:
             message = f"Device {device.familiar_name} {action} for {TimeUtils.format_datetime_with_tz(electricity_price.start_time, request.user, '%H:%M')}"
-            
-        return JsonResponse({
-            "success": True,
-            "action": action,
-            "assigned": assigned,
-            "message": message
-        })
+
+        return JsonResponse({"success": True, "action": action, "assigned": assigned, "message": message})
         
     except json.JSONDecodeError:
         return JsonResponse({"success": False, "error": "Invalid JSON data"})
@@ -507,23 +670,35 @@ def toggle_device_status(request):
         
         if not device_id:
             return JsonResponse({"success": False, "error": "Missing device_id"})
-        
-        # Get the device (ensure user owns it)
+
+        is_ev = str(device_id).startswith("ev_")
+        action = "enabled" if enabled else "disabled"
+
+        if is_ev:
+            ev_id = int(str(device_id)[3:])
+            try:
+                charger = EVCharger.objects.get(id=ev_id, user=request.user)
+            except EVCharger.DoesNotExist:
+                return JsonResponse({"success": False, "error": "EV Charger not found or access denied"})
+            charger.status = 1 if enabled else 0
+            charger.save()
+            return JsonResponse({
+                "success": True, "enabled": enabled,
+                "message": f"EV Charger {charger.familiar_name} automation {action}",
+            })
+
         try:
             device = ShellyDevice.objects.get(device_id=device_id, user=request.user)
         except ShellyDevice.DoesNotExist:
             return JsonResponse({"success": False, "error": "Device not found or access denied"})
-        
-        # Update device status (1 = enabled, 0 = disabled)
+
         device.status = 1 if enabled else 0
         device.save()
-        
-        action = "enabled" if enabled else "disabled"
-        
+
         return JsonResponse({
             "success": True,
             "enabled": enabled,
-            "message": f"Device {device.familiar_name} automation {action}"
+            "message": f"Device {device.familiar_name} automation {action}",
         })
         
     except json.JSONDecodeError:
