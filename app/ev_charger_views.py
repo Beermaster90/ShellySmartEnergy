@@ -4,7 +4,7 @@ from collections import defaultdict
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 
-from app.models import EVCharger, EVChargerEnergyLog
+from app.models import EVCharger, EVChargerAssignment, EVChargerEnergyLog
 from app.utils.time_utils import TimeUtils
 
 
@@ -115,7 +115,6 @@ def ev_charger_energy_history(request):
         return JsonResponse({"error": "EV Charger not found"}, status=404)
 
     import pytz
-    from app.models import ElectricityPrice
     user_tz = TimeUtils.get_user_timezone(request.user)
     now_utc = TimeUtils.now_utc()
     now_local = now_utc.astimezone(user_tz)
@@ -130,60 +129,37 @@ def ev_charger_energy_history(request):
     window_start_utc = yesterday_start.astimezone(pytz.utc)
     window_end_utc = tomorrow_end.astimezone(pytz.utc)
 
-    # --- Distinct odometer readings ordered by time ---
-    # Tuya only pushes updates at session boundaries, so deltas land on single readings.
-    # We spread each delta evenly across all hours between consecutive readings so every
-    # hour that the charger was running gets an equal share of the energy.
-    logs = list(
-        EVChargerEnergyLog.objects.filter(
+    # --- Assignments where charging actually happened (charge_current_a is set) ---
+    assignments = list(
+        EVChargerAssignment.objects
+        .filter(
             charger=charger,
-            recorded_at__gte=window_start_utc - timedelta(hours=2),  # extra buffer for first delta
-            recorded_at__lte=window_end_utc,
+            electricity_price__start_time__gte=window_start_utc,
+            electricity_price__start_time__lte=window_end_utc,
+            charge_current_a__isnull=False,
         )
-        .order_by("recorded_at")
-        .values("recorded_at", "total_energy_kwh")
+        .select_related("electricity_price")
     )
 
-    # Deduplicate to distinct (timestamp, total) pairs — keep highest total per minute
-    seen_minutes: dict = {}
-    for entry in logs:
-        minute_key = entry["recorded_at"].replace(second=0, microsecond=0)
-        total = float(entry["total_energy_kwh"])
-        if minute_key not in seen_minutes or total > seen_minutes[minute_key][1]:
-            seen_minutes[minute_key] = (entry["recorded_at"], total)
-    distinct_logs = sorted(seen_minutes.values(), key=lambda x: x[0])
+    # For active session: energy_kwh is still null until charger_end.
+    # Estimate per slot from current × 230V × 15min — realistic without needing session total.
+    for a in assignments:
+        if a.energy_kwh is None and a.charge_current_a:
+            a.energy_kwh = round(a.charge_current_a * 230 * 0.25 / 1000, 3)  # kWh
 
-    # Distribute delta kWh evenly across all hours between consecutive readings
-    hourly_kwh: dict = defaultdict(float)  # hour_key → kWh
-    for i in range(1, len(distinct_logs)):
-        prev_ts, prev_total = distinct_logs[i - 1]
-        curr_ts, curr_total = distinct_logs[i]
-        delta = max(0.0, curr_total - prev_total)
-        if delta == 0:
+    # Build hourly kWh and cost from assignments
+    hourly_kwh: dict = defaultdict(float)
+    hourly_cost: dict = defaultdict(float)
+    for a in assignments:
+        if a.energy_kwh is None:
             continue
-        # Enumerate all hour-slot starts between prev_ts and curr_ts
-        prev_local = prev_ts.astimezone(user_tz)
-        curr_local = curr_ts.astimezone(user_tz)
-        hour_start = prev_local.replace(minute=0, second=0, microsecond=0)
-        hours_covered = []
-        while hour_start <= curr_local:
-            hours_covered.append(hour_start.strftime("%Y-%m-%d %H:00"))
-            hour_start += timedelta(hours=1)
-        if hours_covered:
-            kwh_per_hour = delta / len(hours_covered)
-            for hk in hours_covered:
-                hourly_kwh[hk] += kwh_per_hour
-
-    # --- All 15-min price slots in the window, grouped by hour ---
-    prices_qs = (
-        ElectricityPrice.objects
-        .filter(start_time__gte=window_start_utc, start_time__lte=window_end_utc)
-        .values("start_time", "price_kwh")
-    )
-    hourly_slots: dict = defaultdict(list)  # hour_key → [price_kwh, ...]
-    for p in prices_qs:
-        hk = p["start_time"].astimezone(user_tz).strftime("%Y-%m-%d %H:00")
-        hourly_slots[hk].append(float(p["price_kwh"] or 0))
+        slot_local = a.electricity_price.start_time.astimezone(user_tz)
+        hour_key = slot_local.strftime("%Y-%m-%d %H:00")
+        kwh = float(a.energy_kwh)
+        hourly_kwh[hour_key] += kwh
+        transfer = day_transfer if 7 <= slot_local.hour < 22 else night_transfer
+        price = float(a.electricity_price.price_kwh or 0)
+        hourly_cost[hour_key] += kwh * (price + transfer) * VAT / 100
 
     # --- Build hourly result ---
     labels = []
@@ -200,15 +176,10 @@ def ev_charger_energy_history(request):
         kwh = round(hourly_kwh.get(hour_key, 0.0), 3)
         kwh_actual.append(kwh if kwh > 0 else None)
 
-        if kwh > 0 and hour_key in hourly_slots:
-            transfer = day_transfer if 7 <= slot.hour < 22 else night_transfer
-            slots = hourly_slots[hour_key]
-            kwh_per_slot = kwh / len(slots)
-            cost_eur = round(sum(kwh_per_slot * (p + transfer) * VAT / 100 for p in slots), 4)
-            cost_actual.append(cost_eur)
+        cost_eur = round(hourly_cost.get(hour_key, 0.0), 4)
+        cost_actual.append(cost_eur if cost_eur > 0 else None)
+        if cost_eur > 0:
             day_costs[day_key] += cost_eur
-        else:
-            cost_actual.append(None)
 
         slot += timedelta(hours=1)
 
@@ -256,7 +227,6 @@ def ev_charger_monthly_cost(request):
     except EVCharger.DoesNotExist:
         return JsonResponse({"error": "EV Charger not found"}, status=404)
 
-    from app.models import EVChargerAssignment, ElectricityPrice
     user_tz = TimeUtils.get_user_timezone(request.user)
     now_utc = TimeUtils.now_utc()
     cutoff = now_utc - timedelta(days=366)
@@ -265,55 +235,28 @@ def ev_charger_monthly_cost(request):
     day_transfer = float(charger.day_transfer_price)
     night_transfer = float(charger.night_transfer_price)
 
-    # --- Daily kWh from odometer ---
-    logs = (
-        EVChargerEnergyLog.objects.filter(charger=charger, recorded_at__gte=cutoff)
-        .order_by("recorded_at")
-        .values("recorded_at", "total_energy_kwh")
-    )
-    daily_peak: dict = {}
-    for entry in logs:
-        day_key = entry["recorded_at"].astimezone(user_tz).strftime("%Y-%m-%d")
-        total = float(entry["total_energy_kwh"])
-        if day_key not in daily_peak or total > daily_peak[day_key]:
-            daily_peak[day_key] = total
-
-    sorted_days = sorted(daily_peak.keys())
-    daily_kwh: dict = {}
-    for i, day in enumerate(sorted_days):
-        prev = daily_peak[sorted_days[i - 1]] if i > 0 else daily_peak[day]
-        daily_kwh[day] = max(0.0, daily_peak[day] - prev)
-
-    # --- Assigned slots with exact prices, grouped by day ---
-    # For each day: cost = daily_kwh × sum(slot_price + slot_transfer) / n_slots × VAT / 100
-    # This uses only actual assignment data — no fallbacks.
-    assigned_slots = (
+    # --- Monthly kWh and cost from assignments where charging actually happened ---
+    assignments = (
         EVChargerAssignment.objects
-        .filter(charger=charger, electricity_price__start_time__gte=cutoff)
-        .exclude(assignment_type="removed_overheat")
-        .values("electricity_price__start_time", "electricity_price__price_kwh")
+        .filter(
+            charger=charger,
+            electricity_price__start_time__gte=cutoff,
+            charge_current_a__isnull=False,
+            energy_kwh__isnull=False,
+        )
+        .select_related("electricity_price")
     )
-    # day_key → list of full_price_c_kwh values (market + exact transfer) for each slot
-    daily_slot_prices: dict = defaultdict(list)
-    for a in assigned_slots:
-        slot_local = a["electricity_price__start_time"].astimezone(user_tz)
-        transfer = day_transfer if 7 <= slot_local.hour < 22 else night_transfer
-        market = float(a["electricity_price__price_kwh"] or 0)
-        full_price = (market + transfer) * VAT
-        daily_slot_prices[slot_local.strftime("%Y-%m-%d")].append(full_price)
 
-    # Compute monthly cost by accumulating daily costs
     monthly_kwh: dict = defaultdict(float)
     monthly_cost: dict = defaultdict(float)
-    for day, kwh in daily_kwh.items():
-        month_key = day[:7]
+    for a in assignments:
+        slot_local = a.electricity_price.start_time.astimezone(user_tz)
+        month_key = slot_local.strftime("%Y-%m")
+        kwh = float(a.energy_kwh)
         monthly_kwh[month_key] += kwh
-        slot_prices = daily_slot_prices.get(day)
-        if slot_prices and kwh > 0:
-            # Each slot gets an equal share of the day's kWh; sum exact slot costs
-            kwh_per_slot = kwh / len(slot_prices)
-            day_cost = sum(kwh_per_slot * p / 100 for p in slot_prices)
-            monthly_cost[month_key] += day_cost
+        transfer = day_transfer if 7 <= slot_local.hour < 22 else night_transfer
+        price = float(a.electricity_price.price_kwh or 0)
+        monthly_cost[month_key] += kwh * (price + transfer) * VAT / 100
 
     # Build 12-month result
     labels = []

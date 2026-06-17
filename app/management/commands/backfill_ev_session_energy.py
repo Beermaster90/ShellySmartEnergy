@@ -101,7 +101,10 @@ class Command(BaseCommand):
             if not dry_run:
                 for a in assignments:
                     a.energy_kwh = round(kwh_per_slot, 3)
-                    a.save(update_fields=["energy_kwh"])
+                    # Mark as confirmed charging (use charger default; no per-slot historical data)
+                    if a.charge_current_a is None:
+                        a.charge_current_a = charger.charge_current_a
+                    a.save(update_fields=["energy_kwh", "charge_current_a"])
                 total_updated += len(assignments)
 
         if not dry_run:
