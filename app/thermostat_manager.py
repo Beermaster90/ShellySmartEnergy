@@ -58,9 +58,12 @@ class ThermostatAssignmentManager:
             min_trigger = min_temp - hysteresis
             max_trigger = max_temp + hysteresis
 
+            effective_headroom = thermostat.get_effective_headroom()
+            headroom_trigger = max_temp - effective_headroom
+
             if current_temp < min_trigger:
                 # Min temperature overrides all rules — force assign regardless of price.
-                # Also re-activates any previously removed_overheat record.
+                # Also re-activates any previously removed_overheat/removed_headroom record.
                 assignment, created = DeviceAssignment.objects.get_or_create(
                     user=device.user,
                     device=device,
@@ -83,7 +86,7 @@ class ThermostatAssignmentManager:
                     user=device.user,
                     device=device,
                     electricity_price=next_price,
-                ).exclude(assignment_type="removed_overheat")
+                ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"])
                 is_protected_minimum_period = (
                     assignment_qs.exists()
                     and ThermostatAssignmentManager._is_minimum_run_period(
@@ -105,9 +108,48 @@ class ThermostatAssignmentManager:
                         f"Thermostat above max ({current_temp} > {max_trigger}). Unassigned next period {next_price.start_time} UTC.",
                         "INFO",
                     )
+            elif effective_headroom > 0 and current_temp > headroom_trigger:
+                # Headroom zone: apartment warm enough — suppress next period assignment.
+                assignment_qs = DeviceAssignment.objects.filter(
+                    user=device.user,
+                    device=device,
+                    electricity_price=next_price,
+                ).exclude(assignment_type__in=["removed_overheat", "removed_headroom", "forced_min"])
+                is_protected_minimum_period = (
+                    assignment_qs.exists()
+                    and ThermostatAssignmentManager._is_minimum_run_period(
+                        device, next_price, now
+                    )
+                )
+                if is_protected_minimum_period:
+                    log_device_event(
+                        device,
+                        f"Thermostat in headroom zone ({current_temp} > {headroom_trigger}). Kept protected minimum-run period {next_price.start_time} UTC.",
+                        "INFO",
+                    )
+                    continue
+
+                updated = assignment_qs.update(assignment_type="removed_headroom")
+                if updated:
+                    log_device_event(
+                        device,
+                        f"Thermostat in headroom zone ({current_temp} > {headroom_trigger}, headroom={effective_headroom}°C). Suppressed next period {next_price.start_time} UTC.",
+                        "INFO",
+                    )
             else:
-                # Within bounds: no assignment change.
-                continue
+                # Within bounds: restore removed_headroom back to cheapest if temperature dropped.
+                restored = DeviceAssignment.objects.filter(
+                    user=device.user,
+                    device=device,
+                    electricity_price=next_price,
+                    assignment_type="removed_headroom",
+                ).update(assignment_type="cheapest")
+                if restored:
+                    log_device_event(
+                        device,
+                        f"Headroom no longer active ({current_temp} <= {headroom_trigger}). Restored next period {next_price.start_time} UTC to cheapest.",
+                        "INFO",
+                    )
 
     @staticmethod
     def _is_minimum_run_period(device: ShellyDevice, price: ElectricityPrice, now) -> bool:

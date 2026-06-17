@@ -360,21 +360,30 @@ def set_cheapest_hours():
         for device in devices:
             print(f"Processing device: {device.device_id} ({device.familiar_name})")
 
-            # Thermostat takes priority: skip all assignments if temperature is above max
+            # Thermostat takes priority: skip all assignments if temperature is above max or in headroom zone
             if device.thermostat_device:
                 thermostat = device.thermostat_device
-                if (
-                    thermostat.temperature_updated_at
-                    and (current_time - thermostat.temperature_updated_at) <= timedelta(minutes=15)
-                    and thermostat.current_temperature > thermostat.max_temperature + Decimal("0.5")
-                ):
-                    log_device_event(
-                        device,
-                        f"Skipping assignments: thermostat {thermostat.familiar_name} above max "
-                        f"({thermostat.current_temperature} > {thermostat.max_temperature + Decimal('0.5')}).",
-                        "INFO",
-                    )
-                    continue
+                if thermostat.temperature_updated_at and (current_time - thermostat.temperature_updated_at) <= timedelta(minutes=15):
+                    max_trigger = thermostat.max_temperature + Decimal("0.5")
+                    effective_headroom = thermostat.get_effective_headroom()
+                    headroom_trigger = thermostat.max_temperature - effective_headroom
+
+                    if thermostat.current_temperature > max_trigger:
+                        log_device_event(
+                            device,
+                            f"Skipping assignments: thermostat {thermostat.familiar_name} above max "
+                            f"({thermostat.current_temperature} > {max_trigger}).",
+                            "INFO",
+                        )
+                        continue
+                    elif effective_headroom > 0 and thermostat.current_temperature > headroom_trigger:
+                        log_device_event(
+                            device,
+                            f"Skipping assignments: thermostat {thermostat.familiar_name} in headroom zone "
+                            f"({thermostat.current_temperature} > {headroom_trigger}, headroom={effective_headroom}°C).",
+                            "INFO",
+                        )
+                        continue
 
             # Get cheapest hours for this device (tagged with assignment type)
             tagged_hours = get_cheapest_hours(

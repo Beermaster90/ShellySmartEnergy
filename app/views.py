@@ -152,11 +152,14 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
     assigned_devices_map = {}
     forced_devices_map = {}
     removed_overheat_map = {}
+    removed_headroom_map = {}
     for assignment in assignments:
         price_id = assignment.electricity_price.id
         device_key = str(assignment.device.device_id)
         if assignment.assignment_type == "removed_overheat":
             removed_overheat_map.setdefault(price_id, []).append(device_key)
+        elif assignment.assignment_type == "removed_headroom":
+            removed_headroom_map.setdefault(price_id, []).append(device_key)
         else:
             assigned_devices_map.setdefault(price_id, []).append(device_key)
             if assignment.assignment_type == "forced_min":
@@ -171,6 +174,7 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
         price["assigned_devices"] = ",".join(assigned_devices_map.get(price["id"], []))
         price["forced_devices"] = ",".join(forced_devices_map.get(price["id"], []))
         price["removed_overheat_devices"] = ",".join(removed_overheat_map.get(price["id"], []))
+        price["removed_headroom_devices"] = ",".join(removed_headroom_map.get(price["id"], []))
         price_user_tz = TimeUtils.to_user_timezone(price["start_time"], request.user)
         price["hour"] = str(price_user_tz.hour)
         price["time_key"] = f"{price_user_tz.hour:02d}:{price_user_tz.minute:02d}"

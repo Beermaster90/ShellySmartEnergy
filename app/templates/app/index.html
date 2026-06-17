@@ -309,7 +309,7 @@
                     <th>Total Price (c/kWh)</th>
                     <th>Assigned</th>
                     <th title="Forced ON by min temperature override">Forced</th>
-                    <th title="Removed by thermostat overheating">Removed</th>
+                    <th title="Removed by thermostat overheating or headroom zone">Removed</th>
                 </tr>
             </thead>
             <tbody>
@@ -318,6 +318,7 @@
                     data-assigned="{{ price.assigned_devices }}"
                     data-forced="{{ price.forced_devices }}"
                     data-removed-overheat="{{ price.removed_overheat_devices }}"
+                    data-removed-headroom="{{ price.removed_headroom_devices }}"
                     data-time-key="{{ price.time_key }}"
                     data-price-id="{{ price.id }}"
                     style="cursor: pointer;"
@@ -388,10 +389,14 @@
                     let isForced = forcedList.includes(selectedDeviceId);
                     row.querySelector(".forced").textContent = isForced ? "X" : "";
 
-                    let removedDevices = row.getAttribute("data-removed-overheat") || "";
-                    let removedList = removedDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
-                    let isRemoved = removedList.includes(selectedDeviceId);
-                    row.querySelector(".removed-overheat").textContent = isRemoved ? "Overheating" : "";
+                    let removedOverheatDevices = row.getAttribute("data-removed-overheat") || "";
+                    let removedOverheatList = removedOverheatDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
+                    let removedHeadroomDevices = row.getAttribute("data-removed-headroom") || "";
+                    let removedHeadroomList = removedHeadroomDevices.split(",").map(id => id.trim()).filter(id => id.length > 0);
+                    let removedLabel = "";
+                    if (removedOverheatList.includes(selectedDeviceId)) removedLabel = "Overheating";
+                    else if (removedHeadroomList.includes(selectedDeviceId)) removedLabel = "Headroom";
+                    row.querySelector(".removed-overheat").textContent = removedLabel;
                 });
             }
 

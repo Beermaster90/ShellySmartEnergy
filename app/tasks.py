@@ -210,11 +210,11 @@ class DeviceController:
     def _process_single_device(device: ShellyDevice, active_price_ids: list, start_time) -> None:
         """Process a single device - extracted for use in parallel processing."""
         try:
-            # Check if this 15-minute period is actively assigned (ignore removed_overheat)
+            # Check if this 15-minute period is actively assigned (ignore removed assignments)
             assigned = DeviceAssignment.objects.filter(
                 device=device,
                 electricity_price_id__in=active_price_ids,
-            ).exclude(assignment_type="removed_overheat").exists()
+            ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).exists()
 
             # Thermostat temperature overrides
             if device.thermostat_device_id:
@@ -225,10 +225,12 @@ class DeviceController:
                         from decimal import Decimal
                         min_trigger = thermostat.get_effective_min_temperature() - Decimal("0.5")
                         max_trigger = thermostat.max_temperature + Decimal("0.5")
+                        effective_headroom = thermostat.get_effective_headroom()
+                        headroom_trigger = thermostat.max_temperature - effective_headroom
 
                         if not assigned and thermostat.current_temperature < min_trigger:
                             # Min temperature override: force ON regardless of price or schedule.
-                            # Also re-activates any period previously marked removed_overheat.
+                            # Also re-activates any period previously marked removed.
                             price_obj = ElectricityPrice.objects.filter(id__in=active_price_ids).first()
                             if price_obj:
                                 obj, created = DeviceAssignment.objects.get_or_create(
@@ -237,7 +239,7 @@ class DeviceController:
                                     electricity_price=price_obj,
                                     defaults={"assignment_type": "forced_min"},
                                 )
-                                if not created and obj.assignment_type == "removed_overheat":
+                                if not created and obj.assignment_type in ("removed_overheat", "removed_headroom"):
                                     obj.assignment_type = "forced_min"
                                     obj.save(update_fields=["assignment_type"])
                                 assigned = True
@@ -256,6 +258,17 @@ class DeviceController:
                                     device,
                                     f"Thermostat above max ({thermostat.current_temperature} > {max_trigger}). "
                                     f"Forcing OFF for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
+                                    "INFO",
+                                )
+                            assigned = False
+
+                        elif effective_headroom > 0 and thermostat.current_temperature > headroom_trigger:
+                            # Headroom zone: apartment warm enough — don't run this period.
+                            if assigned:
+                                log_device_event(
+                                    device,
+                                    f"Thermostat in headroom zone ({thermostat.current_temperature} > {headroom_trigger}). "
+                                    f"Not running for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
                                     "INFO",
                                 )
                             assigned = False
@@ -466,7 +479,7 @@ class DeviceController:
         other_devices_running = DeviceAssignment.objects.filter(
             user=charger.user,
             electricity_price_id__in=active_price_ids,
-        ).exclude(assignment_type="removed_overheat").exists()
+        ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).exists()
 
         target_current = (
             charger.charge_current_reduced_a if other_devices_running

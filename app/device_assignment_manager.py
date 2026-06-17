@@ -54,7 +54,7 @@ class DeviceAssignmentManager:
             device__in=devices,
             electricity_price__start_time__gte=now,
             electricity_price__start_time__lt=next_24h,
-        ).exclude(assignment_type="removed_overheat").select_related("electricity_price")
+        ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).select_related("electricity_price")
 
         # Create a dictionary mapping device_id to assigned hours
         device_assignments = {}

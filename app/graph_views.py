@@ -471,7 +471,7 @@ def calculate_device_run_history(device, user_tz, now_utc) -> Dict[str, Any]:
         device=device,
         electricity_price__start_time__gte=week_ago_utc,
         electricity_price__start_time__lte=now_utc,
-    ).exclude(assignment_type="removed_overheat").select_related("electricity_price")
+    ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).select_related("electricity_price")
 
     running_slots: set = set()
     for assignment in assignments:

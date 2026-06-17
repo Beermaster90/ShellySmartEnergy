@@ -121,27 +121,34 @@ class ShellyTemperature(models.Model):
         decimal_places=2,
         default=0,
         verbose_name="Min temperature (winter)",
-        help_text="Minimum temperature threshold Sep 1 – Mar 31 (winter season)",
+        help_text="Failsafe temperature Sep 1 – Mar 31 — forced heating activates below this",
     )
     min_temperature_summer = models.DecimalField(
         max_digits=5,
         decimal_places=2,
         default=0,
         verbose_name="Min temperature (summer)",
-        help_text="Minimum temperature threshold Apr 1 – Aug 31 (summer season)",
+        help_text="Failsafe temperature Apr 1 – Aug 31 — forced heating activates below this",
     )
     max_temperature = models.DecimalField(
         max_digits=5,
         decimal_places=2,
         default=0,
-        help_text="Maximum temperature threshold",
+        help_text="Maximum temperature threshold — assignments are removed above this",
     )
-    hoped_temperature = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
+    headroom_winter = models.DecimalField(
+        max_digits=4,
+        decimal_places=1,
         default=0,
-        verbose_name="Target temperature",
-        help_text="Desired temperature setpoint",
+        verbose_name="Headroom (winter, °C)",
+        help_text="Sep 1 – Mar 31: stop assigning this many degrees below max temperature (0 = disabled)",
+    )
+    headroom_summer = models.DecimalField(
+        max_digits=4,
+        decimal_places=1,
+        default=4,
+        verbose_name="Headroom (summer, °C)",
+        help_text="Apr 1 – Aug 31: stop assigning this many degrees below max temperature (0 = disabled)",
     )
     current_temperature = models.DecimalField(
         max_digits=5,
@@ -165,6 +172,14 @@ class ShellyTemperature(models.Model):
         if 4 <= month <= 8:
             return self.min_temperature_summer
         return self.min_temperature_winter
+
+    def get_effective_headroom(self):
+        """Return summer or winter headroom based on the current date."""
+        from app.utils.time_utils import TimeUtils
+        month = TimeUtils.now_utc().month
+        if 4 <= month <= 8:
+            return self.headroom_summer
+        return self.headroom_winter
 
     def __str__(self):
         return self.familiar_name
@@ -358,6 +373,7 @@ class DeviceAssignment(models.Model):
         ("forced_min", "Forced — Min Temperature"),
         ("manual", "Manual"),
         ("removed_overheat", "Removed — Overheating"),
+        ("removed_headroom", "Removed — Headroom"),
     ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
