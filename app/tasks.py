@@ -249,25 +249,13 @@ class DeviceController:
                                 )
 
                         elif thermostat.current_temperature > max_trigger:
-                            # Max temperature override: remove the next upcoming assignment only.
-                            # Each scheduler cycle removes one slot while temp stays high;
-                            # when temp drops the min-override will force it back on.
-                            next_assignment = (
-                                DeviceAssignment.objects.filter(
-                                    device=device,
-                                    electricity_price__start_time__gte=start_time,
-                                )
-                                .exclude(assignment_type="removed_overheat")
-                                .order_by("electricity_price__start_time")
-                                .first()
-                            )
-                            if next_assignment:
-                                next_assignment.assignment_type = "removed_overheat"
-                                next_assignment.save(update_fields=["assignment_type"])
+                            # Force device off for this period. Future-assignment removal is
+                            # handled one-by-one by ThermostatAssignmentManager.apply_next_period_assignments.
+                            if assigned:
                                 log_device_event(
                                     device,
                                     f"Thermostat above max ({thermostat.current_temperature} > {max_trigger}). "
-                                    f"Marked period {next_assignment.electricity_price.start_time.strftime('%Y-%m-%d %H:%M')} UTC as removed_overheat.",
+                                    f"Forcing OFF for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
                                     "INFO",
                                 )
                             assigned = False
