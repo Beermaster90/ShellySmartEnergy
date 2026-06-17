@@ -187,7 +187,8 @@
                     data-thermostat-min-winter="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_winter }}{% endif %}"
                     data-thermostat-min-summer="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_summer }}{% endif %}"
                     data-thermostat-max="{% if device.thermostat_device %}{{ device.thermostat_device.max_temperature }}{% endif %}"
-                    data-thermostat-target="{% if device.thermostat_device %}{{ device.thermostat_device.hoped_temperature }}{% endif %}"
+                    data-thermostat-headroom-winter="{% if device.thermostat_device %}{{ device.thermostat_device.headroom_winter }}{% endif %}"
+                    data-thermostat-headroom-summer="{% if device.thermostat_device %}{{ device.thermostat_device.headroom_summer }}{% endif %}"
                     data-thermostat-current="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.current_temperature }}{% endif %}"
                     data-thermostat-updated="{% if device.thermostat_device and device.thermostat_device.temperature_updated_at %}{{ device.thermostat_device.temperature_updated_at|date:'c' }}{% endif %}"
                     {% if selected_device and device.device_id == selected_device.device_id %}selected{% endif %}>
@@ -287,13 +288,15 @@
             <div id="thermostatInfo" class="device-info-columns">
                 <div class="device-info-left">
                     <p><strong>Thermostat Device:</strong> <span id="thermostatNameText">-</span></p>
-                    <p><strong>Min Temperature (Winter, Sep–Mar):</strong> <span id="thermostatMinWinterText">-</span></p>
-                    <p><strong>Min Temperature (Summer, Apr–Aug):</strong> <span id="thermostatMinSummerText">-</span></p>
+                    <p><strong>Min Temperature (Winter, Sep–Mar):</strong> <span id="thermostatMinWinterText">-</span> <small style="color:#888;">failsafe, forced heating</small></p>
+                    <p><strong>Min Temperature (Summer, Apr–Aug):</strong> <span id="thermostatMinSummerText">-</span> <small style="color:#888;">failsafe, forced heating</small></p>
                     <p><strong>Active Min Temperature:</strong> <span id="thermostatMinActiveText" style="font-weight:700; color:#2471a3;">-</span></p>
                     <p><strong>Max Temperature:</strong> <span id="thermostatMaxText">-</span></p>
+                    <p><strong>Headroom (Winter, Sep–Mar):</strong> <span id="thermostatHeadroomWinterText">-</span></p>
+                    <p><strong>Headroom (Summer, Apr–Aug):</strong> <span id="thermostatHeadroomSummerText">-</span></p>
+                    <p><strong>Active Headroom:</strong> <span id="thermostatHeadroomActiveText" style="font-weight:700; color:#8e44ad;">-</span></p>
                 </div>
                 <div class="device-info-right">
-                    <p><strong>Target Temperature:</strong> <span id="thermostatTargetText">-</span></p>
                     <p><strong>Current Temperature:</strong> <span id="thermostatCurrentText" class="temp-current">-</span></p>
                     <p><strong>Temperature Updated:</strong> <span id="thermostatUpdatedText">-</span></p>
                 </div>
@@ -542,19 +545,32 @@
                     const isSummer = currentMonth >= 4 && currentMonth <= 8;
                     let thermostatMin = isSummer ? thermostatMinSummer : thermostatMinWinter;
                     let thermostatMax = selectedOption.getAttribute("data-thermostat-max") || "";
-                    let thermostatTarget = selectedOption.getAttribute("data-thermostat-target") || "";
+                    let thermostatHeadroomWinter = selectedOption.getAttribute("data-thermostat-headroom-winter") || "";
+                    let thermostatHeadroomSummer = selectedOption.getAttribute("data-thermostat-headroom-summer") || "";
+                    let thermostatHeadroom = isSummer ? thermostatHeadroomSummer : thermostatHeadroomWinter;
                     let thermostatCurrent = selectedOption.getAttribute("data-thermostat-current") || "";
                     let thermostatUpdated = selectedOption.getAttribute("data-thermostat-updated") || "";
 
                     if (thermostatName) {
                         thermostatSection.style.display = "block";
                         document.getElementById("thermostatNameText").innerText = thermostatName;
-                        document.getElementById("thermostatMinWinterText").innerText = thermostatMinWinter ? parseFloat(thermostatMinWinter).toFixed(2) + " C" : "-";
-                        document.getElementById("thermostatMinSummerText").innerText = thermostatMinSummer ? parseFloat(thermostatMinSummer).toFixed(2) + " C" : "-";
-                        document.getElementById("thermostatMinActiveText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " C (" + (isSummer ? "summer" : "winter") + ")" : "-";
-                        document.getElementById("thermostatMaxText").innerText = thermostatMax ? parseFloat(thermostatMax).toFixed(2) + " C" : "-";
-                        document.getElementById("thermostatTargetText").innerText = thermostatTarget ? parseFloat(thermostatTarget).toFixed(2) + " C" : "-";
-                        document.getElementById("thermostatCurrentText").innerText = thermostatCurrent ? parseFloat(thermostatCurrent).toFixed(2) + " C" : "N/A";
+                        document.getElementById("thermostatMinWinterText").innerText = thermostatMinWinter ? parseFloat(thermostatMinWinter).toFixed(2) + " °C" : "-";
+                        document.getElementById("thermostatMinSummerText").innerText = thermostatMinSummer ? parseFloat(thermostatMinSummer).toFixed(2) + " °C" : "-";
+                        document.getElementById("thermostatMinActiveText").innerText = thermostatMin ? parseFloat(thermostatMin).toFixed(2) + " °C (" + (isSummer ? "summer" : "winter") + ")" : "-";
+                        document.getElementById("thermostatMaxText").innerText = thermostatMax ? parseFloat(thermostatMax).toFixed(2) + " °C" : "-";
+                        let headroomWinterVal = thermostatHeadroomWinter !== "" ? parseFloat(thermostatHeadroomWinter) : null;
+                        let headroomSummerVal = thermostatHeadroomSummer !== "" ? parseFloat(thermostatHeadroomSummer) : null;
+                        document.getElementById("thermostatHeadroomWinterText").innerText = headroomWinterVal !== null ? (headroomWinterVal === 0 ? "0 °C (disabled)" : headroomWinterVal.toFixed(1) + " °C") : "-";
+                        document.getElementById("thermostatHeadroomSummerText").innerText = headroomSummerVal !== null ? (headroomSummerVal === 0 ? "0 °C (disabled)" : headroomSummerVal.toFixed(1) + " °C") : "-";
+                        let activeHeadroomVal = thermostatHeadroom !== "" ? parseFloat(thermostatHeadroom) : null;
+                        let thermostatMaxVal = thermostatMax !== "" ? parseFloat(thermostatMax) : null;
+                        if (activeHeadroomVal !== null && activeHeadroomVal > 0 && thermostatMaxVal !== null) {
+                            let stopAt = (thermostatMaxVal - activeHeadroomVal).toFixed(1);
+                            document.getElementById("thermostatHeadroomActiveText").innerText = activeHeadroomVal.toFixed(1) + " °C — stops heating above " + stopAt + " °C, resumes below " + stopAt + " °C (" + (isSummer ? "summer" : "winter") + ")";
+                        } else {
+                            document.getElementById("thermostatHeadroomActiveText").innerText = "Disabled (" + (isSummer ? "summer" : "winter") + ")";
+                        }
+                        document.getElementById("thermostatCurrentText").innerText = thermostatCurrent ? parseFloat(thermostatCurrent).toFixed(2) + " °C" : "N/A";
                         if (thermostatUpdated) {
                             const updatedDate = new Date(thermostatUpdated);
                             const formattedUpdated = `${String(updatedDate.getDate()).padStart(2, '0')}.${String(updatedDate.getMonth() + 1).padStart(2, '0')} - ${String(updatedDate.getHours()).padStart(2, '0')}:${String(updatedDate.getMinutes()).padStart(2, '0')}`;
