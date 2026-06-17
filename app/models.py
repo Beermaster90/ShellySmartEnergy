@@ -241,6 +241,12 @@ class EVCharger(models.Model):
     )
     status = models.IntegerField(default=1, help_text="1 = automation enabled, 0 = disabled")
 
+    # Session tracking — set when charging starts, used to distribute session energy at end
+    session_started_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the current/last charging session started (UTC)",
+    )
+
     # Cached live state — refreshed every 15 minutes by the scheduler
     is_charging = models.BooleanField(default=False)
     work_state = models.CharField(max_length=64, blank=True, default="")
@@ -279,7 +285,11 @@ class EVChargerAssignment(models.Model):
     )
     energy_kwh = models.DecimalField(
         max_digits=8, decimal_places=3, null=True, blank=True,
-        help_text="Energy used during this period (kWh), filled in by scheduler after the period ends",
+        help_text="Energy used during this period (kWh), filled in after session ends",
+    )
+    charge_current_a = models.IntegerField(
+        null=True, blank=True,
+        help_text="Charge current (A) recorded during this slot — used to weight session energy split",
     )
 
     def __str__(self):

@@ -77,3 +77,4 @@ data/.django_secret_key
 
 # Tuya credentials
 tuya_test/tuya_credentials.py
+tuya_local_test/device_config.json

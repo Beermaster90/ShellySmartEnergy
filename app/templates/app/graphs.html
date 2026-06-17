@@ -202,7 +202,7 @@
     <div class="col-md-12">
         <div class="panel panel-warning">
             <div class="panel-heading">
-                <h3 class="panel-title">EV Charger — Daily Energy Charged (kWh)</h3>
+                <h3 class="panel-title">EV Charger — Hourly Energy: Yesterday, Today &amp; Tomorrow</h3>
             </div>
             <div class="panel-body">
                 <div class="form-group">
@@ -775,42 +775,79 @@
         const chargerId = sel.value;
         if (!chargerId) return;
 
-        // Daily energy chart
+        // Hourly energy chart (yesterday + today + tomorrow)
         document.getElementById('evEnergyLoading').style.display = 'block';
         const energyCanvas = document.getElementById('evEnergyChart');
         energyCanvas.style.display = 'none';
         document.getElementById('evEnergyTotal').textContent = '';
 
-        fetch(`/shellyapp/ev-charger-energy/?charger_id=${chargerId}&days=30`)
+        fetch(`/shellyapp/ev-charger-energy/?charger_id=${chargerId}`)
             .then(r => r.json())
             .then(data => {
                 document.getElementById('evEnergyLoading').style.display = 'none';
                 if (data.error) return;
                 if (evEnergyChart) evEnergyChart.destroy();
                 energyCanvas.style.display = 'block';
+
+                // Find the index of "now" to draw a vertical annotation line
+                const nowIdx = data.labels.indexOf(data.now_label);
+
                 evEnergyChart = new Chart(energyCanvas.getContext('2d'), {
                     type: 'bar',
                     data: {
                         labels: data.labels,
                         datasets: [{
                             label: 'kWh charged',
-                            data: data.kwh,
-                            backgroundColor: 'rgba(255, 159, 64, 0.7)',
+                            data: data.kwh_actual,
+                            backgroundColor: 'rgba(255, 159, 64, 0.75)',
                             borderColor: 'rgba(255, 159, 64, 1)',
                             borderWidth: 1,
+                            spanGaps: false,
                         }],
                     },
                     options: {
                         responsive: true,
-                        plugins: { legend: { display: false } },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: ctx => {
+                                        const kwh = ctx.parsed.y;
+                                        if (kwh === null) return 'No data';
+                                        const cost = (data.cost_actual || [])[ctx.dataIndex];
+                                        return cost != null
+                                            ? `${kwh} kWh  —  €${cost.toFixed(4)}`
+                                            : `${kwh} kWh`;
+                                    },
+                                },
+                            },
+                        },
                         scales: {
                             y: { beginAtZero: true, title: { display: true, text: 'kWh' } },
-                            x: { title: { display: true, text: 'Date' } },
+                            x: {
+                                ticks: {
+                                    maxRotation: 0,
+                                    font: { size: 10 },
+                                    callback: (val, idx) => {
+                                        const label = data.labels[idx] || '';
+                                        // Show date label at midnight, hour only every 3h
+                                        if (label.endsWith('00:00')) return label.slice(0, 5);
+                                        if (idx % 3 === 0) return label.slice(6);
+                                        return '';
+                                    },
+                                },
+                            },
                         },
                     },
                 });
+                const totalActual = (data.kwh_actual || []).reduce((s, v) => s + (v || 0), 0);
+                const dc = data.day_costs || {};
+                const costLine = [
+                    dc.yesterday ? `${dc.yesterday.label}: €${dc.yesterday.cost_eur.toFixed(2)}` : null,
+                    dc.today     ? `${dc.today.label}: €${dc.today.cost_eur.toFixed(2)}` : null,
+                ].filter(Boolean).join('  |  ');
                 document.getElementById('evEnergyTotal').textContent =
-                    `Total energy charged (all time): ${data.total_kwh} kWh`;
+                    `Total charged: ${totalActual.toFixed(3)} kWh` + (costLine ? `  —  Cost: ${costLine}` : '');
             })
             .catch(() => { document.getElementById('evEnergyLoading').style.display = 'none'; });
 

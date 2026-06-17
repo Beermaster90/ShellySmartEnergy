@@ -414,6 +414,8 @@ class DeviceController:
             log_ev_event(charger, "Failed to fetch status from charger API", "ERROR")
             return
 
+        previous_work_state = charger.work_state
+
         # Update cached state on the model
         charger.is_charging = status.is_charging
         charger.work_state = status.work_state
@@ -423,9 +425,16 @@ class DeviceController:
         charger.session_energy_kwh = round(status.session_energy_kwh, 3)
         charger.total_energy_kwh = round(status.total_energy_kwh, 3)
         charger.last_contact = TimeUtils.now_utc()
+
+        # Detect session start
+        if status.work_state == "charger_charging" and previous_work_state != "charger_charging":
+            charger.session_started_at = TimeUtils.now_utc()
+            log_ev_event(charger, "Charging session started", "INFO")
+
         charger.save(update_fields=[
             "is_charging", "work_state", "connection_state", "power_w",
-            "temp_c", "session_energy_kwh", "total_energy_kwh", "last_contact", "updated_at",
+            "temp_c", "session_energy_kwh", "total_energy_kwh", "last_contact",
+            "session_started_at", "updated_at",
         ])
 
         # Log energy reading
@@ -437,30 +446,32 @@ class DeviceController:
             power_w=status.power_w,
         )
 
-        # Back-fill energy_kwh on the PREVIOUS period's assignment.
-        # The two most recent logs bracket the previous 15-minute window.
-        try:
-            recent_logs = list(
-                EVChargerEnergyLog.objects.filter(charger=charger)
-                .order_by("-recorded_at")[:2]
-            )
-            if len(recent_logs) == 2:
-                energy_delta = max(
-                    0.0,
-                    float(recent_logs[0].total_energy_kwh) - float(recent_logs[1].total_energy_kwh),
-                )
-                prev_period_start = start_time - timedelta(minutes=15)
-                prev_period_end = start_time - timedelta(seconds=1)
-                prev_prices = ElectricityPrice.objects.filter(
-                    start_time__range=(prev_period_start, prev_period_end)
-                ).values_list("id", flat=True)
-                EVChargerAssignment.objects.filter(
-                    charger=charger,
-                    electricity_price_id__in=prev_prices,
-                    energy_kwh__isnull=True,
-                ).update(energy_kwh=round(energy_delta, 3))
-        except Exception:
-            pass  # Never let energy accounting break the control loop
+        # On session end: distribute charge_energy_once across session assignments weighted by current
+        if previous_work_state == "charger_charging" and status.work_state == "charger_end":
+            try:
+                session_kwh = float(status.session_energy_kwh)
+                if session_kwh > 0 and charger.session_started_at:
+                    session_assignments = list(
+                        EVChargerAssignment.objects.filter(
+                            charger=charger,
+                            electricity_price__start_time__gte=charger.session_started_at,
+                            charge_current_a__isnull=False,
+                        )
+                    )
+                    if session_assignments:
+                        total_current = sum(a.charge_current_a for a in session_assignments)
+                        for a in session_assignments:
+                            weight = a.charge_current_a / total_current
+                            a.energy_kwh = round(session_kwh * weight, 3)
+                            a.save(update_fields=["energy_kwh"])
+                        log_ev_event(
+                            charger,
+                            f"Session ended — {session_kwh:.3f} kWh split across "
+                            f"{len(session_assignments)} slot(s)",
+                            "INFO",
+                        )
+            except Exception as e:
+                log_ev_event(charger, f"Error distributing session energy: {e}", "ERROR")
 
         # Determine if other Shelly devices belonging to this user are running this period.
         # If so, use the reduced current to protect the fuse.
@@ -484,13 +495,32 @@ class DeviceController:
             "INFO",
         )
 
+        # States where a car is physically connected and ready to accept a charge command.
+        # Do not attempt start_charging if the car is not plugged in.
+        CAR_CONNECTED_STATES = {"charger_insert", "charger_charging", "charger_pause", "charger_end"}
+        car_connected = status.work_state in CAR_CONNECTED_STATES
+
+        # Record charge current on the active assignment so session-end split is weighted correctly
+        if status.is_charging:
+            EVChargerAssignment.objects.filter(
+                charger=charger,
+                electricity_price_id__in=active_price_ids,
+            ).update(charge_current_a=target_current)
+
         if assigned and not status.is_charging:
-            ok = service.start_charging(target_current)
-            log_ev_event(
-                charger,
-                f"Started charging at {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
-                "INFO" if ok else "ERROR",
-            )
+            if not car_connected:
+                log_ev_event(
+                    charger,
+                    f"Skipping start_charging — car not connected (work_state={status.work_state!r})",
+                    "INFO",
+                )
+            else:
+                ok = service.start_charging(target_current)
+                log_ev_event(
+                    charger,
+                    f"Started charging at {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
+                    "INFO" if ok else "ERROR",
+                )
         elif assigned and status.is_charging:
             # Already charging — adjust current every cycle so it reacts to devices turning on/off
             ok = service.set_charge_current(target_current)

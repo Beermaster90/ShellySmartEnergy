@@ -91,4 +91,65 @@
     </ul>
 {% endif %}
 
+{% if ev_chargers %}
+<hr>
+<h3>EV Charger — Live Raw DPs</h3>
+<p class="text-muted small">Auto-refreshes every 15 seconds. Watch values change while charging.</p>
+<div style="margin-bottom:8px;">
+    <label>Charger:</label>
+    <select id="rawDpsChargerSelect" class="form-control" style="display:inline-block;width:auto;margin:0 8px;">
+        {% for charger in ev_chargers %}
+            <option value="{{ charger.id }}">{{ charger.familiar_name }}</option>
+        {% endfor %}
+    </select>
+    <button id="rawDpsToggle" class="btn btn-default" onclick="toggleRawDpsPolling()">Start</button>
+    <span id="rawDpsStatus" class="text-muted small" style="margin-left:10px;"></span>
+</div>
+<table class="table table-condensed table-bordered" style="max-width:500px;">
+    <thead><tr><th>DP Code</th><th>Value</th></tr></thead>
+    <tbody id="rawDpsBody"><tr><td colspan="2" class="text-muted">Press Start to begin polling.</td></tr></tbody>
+</table>
+
+<script>
+(function () {
+    let polling = false;
+    let timer = null;
+
+    function fetchDps() {
+        const chargerId = document.getElementById('rawDpsChargerSelect').value;
+        if (!chargerId) return;
+        const ts = new Date().toLocaleTimeString();
+        document.getElementById('rawDpsStatus').textContent = 'Fetching…';
+        fetch(`/shellyapp/ev-charger-raw-dps/?charger_id=${chargerId}`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('rawDpsStatus').textContent = `Last update: ${ts}`;
+                const rows = (data.result || []).map(dp =>
+                    `<tr><td><strong>${dp.code}</strong></td><td>${JSON.stringify(dp.value)}</td></tr>`
+                ).join('');
+                document.getElementById('rawDpsBody').innerHTML = rows || '<tr><td colspan="2">No data</td></tr>';
+            })
+            .catch(() => {
+                document.getElementById('rawDpsStatus').textContent = `Error at ${ts}`;
+            });
+    }
+
+    function scheduleNext() {
+        if (polling) timer = setTimeout(() => { fetchDps(); scheduleNext(); }, 15000);
+    }
+
+    window.toggleRawDpsPolling = function () {
+        polling = !polling;
+        document.getElementById('rawDpsToggle').textContent = polling ? 'Stop' : 'Start';
+        if (polling) { fetchDps(); scheduleNext(); }
+        else if (timer) clearTimeout(timer);
+    };
+
+    document.getElementById('rawDpsChargerSelect').addEventListener('change', () => {
+        if (polling) fetchDps();
+    });
+})();
+</script>
+{% endif %}
+
 {% endblock %}

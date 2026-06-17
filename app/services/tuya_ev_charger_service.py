@@ -117,15 +117,23 @@ class TuyaEVChargerService(EVChargerServiceBase):
         if not data:
             return None
         dps = {dp["code"]: dp["value"] for dp in data.get("result", [])}
+        work_state = str(dps.get("work_state", ""))
+        is_charging = work_state == "charger_charging"
+        charge_current_a = int(dps.get("charge_cur_set", 0))
+        # power_total is non-functional on this device (always 0).
+        # Estimate from set current × 230 V when actively charging.
+        power_raw = int(dps.get("power_total", 0))
+        if power_raw == 0 and is_charging and charge_current_a > 0:
+            power_raw = charge_current_a * 230
         return EVChargerStatus(
-            is_charging=bool(dps.get("switch", False)),
-            work_state=str(dps.get("work_state", "")),
+            is_charging=is_charging,
+            work_state=work_state,
             connection_state=str(dps.get("connection_state", "")),
-            power_w=int(dps.get("power_total", 0)),
+            power_w=power_raw,
             temp_c=int(dps.get("temp_current", 0)),
             session_energy_kwh=int(dps.get("charge_energy_once", 0)) / self._ENERGY_SCALE,
             total_energy_kwh=int(dps.get("forward_energy_total", 0)) / self._ENERGY_SCALE,
-            charge_current_set_a=int(dps.get("charge_cur_set", 0)),
+            charge_current_set_a=charge_current_a,
         )
 
     def start_charging(self, current_a: int = 6) -> bool:

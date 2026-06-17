@@ -5,7 +5,7 @@ from . import views
 from .shelly_views import fetch_device_status, toggle_device_output
 from .price_views import call_fetch_prices
 from .graph_views import graphs, get_graph_data, get_temperature_data, get_run_history_data
-from .ev_charger_views import ev_charger_energy_history, ev_charger_refresh_status, ev_charger_monthly_cost
+from .ev_charger_views import ev_charger_energy_history, ev_charger_refresh_status, ev_charger_monthly_cost, ev_charger_raw_dps
 from django.contrib.auth import views as auth_views
 
 urlpatterns = [
@@ -47,4 +47,7 @@ urlpatterns = [
     path(
         "ev-charger-monthly-cost/", ev_charger_monthly_cost, name="ev_charger_monthly_cost"
     ),  # AJAX monthly cost for EV charger
+    path(
+        "ev-charger-raw-dps/", ev_charger_raw_dps, name="ev_charger_raw_dps"
+    ),  # Debug: raw Tuya DP codes for EV charger
 ]
