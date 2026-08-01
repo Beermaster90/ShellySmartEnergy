@@ -33,11 +33,11 @@
                                 {% endfor %}
                                 </optgroup>
                                 {% endif %}
-                                {% if ev_charger_devices %}
+                                {% if ev_charger_log_options %}
                                 <optgroup label="EV Chargers">
-                                {% for charger in ev_charger_devices %}
-                                    <option value="ev_{{ charger.id }}" {% if selected_device_id == "ev_"|add:charger.id|stringformat:"s" %}selected{% endif %}>
-                                        {{ charger.familiar_name }} [EV]
+                                {% for charger in ev_charger_log_options %}
+                                    <option value="{{ charger.value }}" {% if charger.selected %}selected{% endif %}>
+                                        {{ charger.name }} [EV]
                                     </option>
                                 {% endfor %}
                                 </optgroup>

@@ -4,6 +4,7 @@ from collections import defaultdict
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 
+from app.logger import log_ev_event
 from app.models import EVCharger, EVChargerAssignment, EVChargerEnergyLog
 from app.utils.time_utils import TimeUtils
 
@@ -26,7 +27,9 @@ def ev_charger_raw_dps(request):
     path = f"/v1.0/devices/{service.device_id}/status"
     data = service._get(path)
     if not data:
-        return JsonResponse({"error": "No response from Tuya"}, status=502)
+        error = service.get_last_error() or "No response from Tuya"
+        log_ev_event(charger, f"Raw Tuya DP fetch failed: {error}", "ERROR")
+        return JsonResponse({"error": error}, status=502)
     return JsonResponse({"result": data.get("result", [])})
 
 
@@ -62,7 +65,9 @@ def ev_charger_refresh_status(request):
         return JsonResponse({"error": f"Service error: {e}"}, status=500)
 
     if status is None:
-        return JsonResponse({"error": "No response from charger API"}, status=502)
+        error = service.get_last_error() or "No response from charger API"
+        log_ev_event(charger, f"Manual status refresh failed: {error}", "ERROR")
+        return JsonResponse({"error": error}, status=502)
 
     now = TimeUtils.now_utc()
     charger.is_charging = status.is_charging

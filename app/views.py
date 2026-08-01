@@ -236,16 +236,35 @@ def about(request: HttpRequest):
     # Device selection
     shelly_devices = ShellyDevice.objects.filter(user=selected_user).order_by("familiar_name")
     ev_charger_devices = EVCharger.objects.filter(user=selected_user).order_by("familiar_name")
-    selected_device_id = request.GET.get("device_id", "")
+    selected_device_id = request.GET.get("device_id", "").strip()
+    ev_charger_log_options = [
+        {
+            "value": f"ev_{charger.id}",
+            "name": charger.familiar_name,
+            "selected": selected_device_id == f"ev_{charger.id}",
+        }
+        for charger in ev_charger_devices
+    ]
 
     # Base queryset
-    if selected_device_id == "system":
+    if selected_device_id == "system" and request.user.is_superuser:
         logs = DeviceLog.objects.filter(device__isnull=True, ev_charger__isnull=True)
-    elif str(selected_device_id).startswith("ev_"):
-        ev_id = int(selected_device_id[3:])
-        logs = DeviceLog.objects.filter(ev_charger__id=ev_id, ev_charger__user=selected_user)
+    elif selected_device_id.startswith("ev_"):
+        raw_ev_id = selected_device_id[3:]
+        if raw_ev_id.isdigit():
+            selected_ev_charger = ev_charger_devices.filter(id=int(raw_ev_id)).first()
+        else:
+            selected_ev_charger = None
+        if selected_ev_charger:
+            logs = DeviceLog.objects.filter(ev_charger=selected_ev_charger)
+        else:
+            logs = DeviceLog.objects.none()
     elif selected_device_id:
-        logs = DeviceLog.objects.filter(device__device_id=selected_device_id, device__user=selected_user)
+        selected_shelly_device = shelly_devices.filter(device_id=selected_device_id).first()
+        if selected_shelly_device:
+            logs = DeviceLog.objects.filter(device=selected_shelly_device)
+        else:
+            logs = DeviceLog.objects.none()
     elif request.user.is_superuser and not request.GET.get("user_id"):
         logs = DeviceLog.objects.all()
     else:
@@ -284,6 +303,7 @@ def about(request: HttpRequest):
             "selected_user": selected_user,
             "shelly_devices": shelly_devices,
             "ev_charger_devices": ev_charger_devices,
+            "ev_charger_log_options": ev_charger_log_options,
             "selected_device_id": selected_device_id,
             "status_filter": status_filter,
             "version": get_version_info(),

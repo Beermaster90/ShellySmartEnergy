@@ -13,6 +13,7 @@ ENV/
 venv/
 env/
 *.sqlite3
+apscheduler.lock
 
 # Django
 db.sqlite3

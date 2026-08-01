@@ -22,6 +22,10 @@ class EVChargerServiceBase(ABC):
     abstract methods, and register the backend key in ev_charger_factory.py.
     """
 
+    def get_last_error(self) -> str:
+        """Return the most recent sanitized backend error, if one is available."""
+        return ""
+
     @abstractmethod
     def get_status(self) -> Optional[EVChargerStatus]:
         """Return current charger status, or None on error."""

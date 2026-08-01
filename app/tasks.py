@@ -412,7 +412,12 @@ class DeviceController:
         status = service.get_status()
 
         if status is None:
-            log_ev_event(charger, "Failed to fetch status from charger API", "ERROR")
+            error = service.get_last_error() or "No response from charger API"
+            log_ev_event(
+                charger,
+                f"Failed to fetch status from charger API: {error}",
+                "ERROR",
+            )
             return
 
         previous_work_state = charger.work_state
@@ -517,24 +522,29 @@ class DeviceController:
                 )
             else:
                 ok = service.start_charging(target_current)
+                error = "" if ok else f" ({service.get_last_error() or 'unknown error'})"
                 log_ev_event(
                     charger,
-                    f"Started charging at {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
+                    f"Started charging at {target_current} A ({current_reason}) — "
+                    f"{'OK' if ok else 'FAILED'}{error}",
                     "INFO" if ok else "ERROR",
                 )
         elif assigned and status.is_charging:
             # Already charging — adjust current every cycle so it reacts to devices turning on/off
             ok = service.set_charge_current(target_current)
+            error = "" if ok else f" ({service.get_last_error() or 'unknown error'})"
             log_ev_event(
                 charger,
-                f"Current set to {target_current} A ({current_reason}) — {'OK' if ok else 'FAILED'}",
+                f"Current set to {target_current} A ({current_reason}) — "
+                f"{'OK' if ok else 'FAILED'}{error}",
                 "INFO" if ok else "ERROR",
             )
         elif not assigned and status.is_charging:
             ok = service.stop_charging()
+            error = "" if ok else f" ({service.get_last_error() or 'unknown error'})"
             log_ev_event(
                 charger,
-                f"Stopped charging — {'OK' if ok else 'FAILED'}",
+                f"Stopped charging — {'OK' if ok else 'FAILED'}{error}",
                 "INFO" if ok else "ERROR",
             )
 
