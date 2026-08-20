@@ -19,6 +19,7 @@ import json
 import pytz
 import os
 from django.conf import settings
+from app.device_override_manager import DeviceOverrideManager
 
 
 def get_version_info():
@@ -162,7 +163,7 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
             removed_headroom_map.setdefault(price_id, []).append(device_key)
         else:
             assigned_devices_map.setdefault(price_id, []).append(device_key)
-            if assignment.assignment_type == "forced_min":
+            if assignment.assignment_type in ("forced_min", "force_on"):
                 forced_devices_map.setdefault(price_id, []).append(device_key)
 
     for ev_assignment in ev_assignments:
@@ -717,7 +718,19 @@ def toggle_device_status(request):
             return JsonResponse({"success": False, "error": "Device not found or access denied"})
 
         device.status = 1 if enabled else 0
-        device.save()
+        update_fields = ["status", "updated_at"]
+        if not enabled:
+            device.force_on = False
+            device.force_off = False
+            device.scheduled_override_until = None
+            update_fields.extend(["force_on", "force_off", "scheduled_override_until"])
+            DeviceAssignment.objects.filter(
+                user=device.user,
+                device=device,
+                assignment_type__in=["force_on", "scheduled_override"],
+                electricity_price__start_time__gte=TimeUtils.now_utc() - timedelta(minutes=15),
+            ).delete()
+        device.save(update_fields=update_fields)
 
         return JsonResponse({
             "success": True,
@@ -729,3 +742,92 @@ def toggle_device_status(request):
         return JsonResponse({"success": False, "error": "Invalid JSON data"})
     except Exception as e:
         return JsonResponse({"success": False, "error": str(e)})
+
+
+def _override_device_for_request(request, device_id):
+    queryset = ShellyDevice.objects.all()
+    if not request.user.is_superuser:
+        queryset = queryset.filter(user=request.user)
+    return queryset.filter(device_id=device_id).first()
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def set_scheduled_device_override(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"success": False, "error": "User not authenticated"}, status=401)
+    try:
+        data = json.loads(request.body)
+        device = _override_device_for_request(request, data.get("device_id"))
+        if not device:
+            return JsonResponse({"success": False, "error": "Device not found or access denied"}, status=404)
+        try:
+            duration_hours = int(data.get("duration_hours"))
+        except (TypeError, ValueError):
+            return JsonResponse({"success": False, "error": "Invalid override duration"}, status=400)
+
+        override_until = DeviceOverrideManager.start_scheduled_override(device, duration_hours)
+        override_start = override_until - timedelta(hours=duration_hours)
+        assigned_price_ids = list(
+            DeviceAssignment.objects.filter(
+                user=device.user,
+                device=device,
+                electricity_price__start_time__gte=override_start,
+                electricity_price__start_time__lt=override_until,
+            )
+            .exclude(assignment_type__in=["removed_overheat", "removed_headroom"])
+            .values_list("electricity_price_id", flat=True)
+        )
+        return JsonResponse({
+            "success": True,
+            "enabled": True,
+            "override_until": override_until.isoformat(),
+            "assigned_price_ids": assigned_price_ids,
+            "message": f"Normal schedule extended for {duration_hours} hours",
+        })
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def toggle_force_device_on(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"success": False, "error": "User not authenticated"}, status=401)
+    try:
+        data = json.loads(request.body)
+        device = _override_device_for_request(request, data.get("device_id"))
+        if not device:
+            return JsonResponse({"success": False, "error": "Device not found or access denied"}, status=404)
+        enabled = data.get("enabled") is True
+        DeviceOverrideManager.set_force_on(device, enabled)
+        return JsonResponse({
+            "success": True,
+            "enabled": enabled,
+            "message": f"Force Device On {'enabled' if enabled else 'disabled'}",
+        })
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def toggle_force_device_off(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"success": False, "error": "User not authenticated"}, status=401)
+    try:
+        data = json.loads(request.body)
+        device = _override_device_for_request(request, data.get("device_id"))
+        if not device:
+            return JsonResponse({"success": False, "error": "Device not found or access denied"}, status=404)
+        enabled = data.get("enabled") is True
+        DeviceOverrideManager.set_force_off(device, enabled)
+        return JsonResponse({
+            "success": True,
+            "enabled": enabled,
+            "message": f"Force Device Off {'enabled' if enabled else 'disabled'}",
+        })
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)

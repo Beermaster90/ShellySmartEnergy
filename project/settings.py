@@ -26,17 +26,31 @@ def _get_secret_key(base_dir: str) -> str:
     if env_key:
         return env_key
 
-    data_dir = Path(base_dir) / "data"
-    key_dir = data_dir if data_dir.exists() else Path(base_dir)
-    key_path = key_dir / ".django_secret_key"
+    configured_key_file = os.environ.get("DJANGO_SECRET_KEY_FILE")
+    if configured_key_file:
+        key_path = Path(configured_key_file).expanduser()
+    elif Path("/data").exists():
+        # docker-prod.sh mounts its persistent host data directory here. Keeping
+        # the signing key beside the session database prevents all sessions from
+        # becoming invalid whenever the application image is rebuilt.
+        key_path = Path("/data/.django_secret_key")
+    else:
+        data_dir = Path(base_dir) / "data"
+        key_dir = data_dir if data_dir.exists() else Path(base_dir)
+        key_path = key_dir / ".django_secret_key"
+
     if key_path.exists():
         key = key_path.read_text().strip()
+        if not key:
+            raise RuntimeError(f"Django secret key file is empty: {key_path}")
         os.environ["DJANGO_SECRET_KEY"] = key
         return key
 
-    # Generate once for local dev and persist it.
+    # Generate once and persist it. In production this path is on /data.
+    key_path.parent.mkdir(parents=True, exist_ok=True)
     new_key = secrets.token_urlsafe(50)
     key_path.write_text(new_key)
+    key_path.chmod(0o600)
     os.environ["DJANGO_SECRET_KEY"] = new_key
     return new_key
 

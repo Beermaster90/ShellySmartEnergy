@@ -42,6 +42,20 @@ class ShellyDevice(models.Model):
     status = models.IntegerField(default=1)  # 1 = automation enabled, 0 = automation disabled
     last_contact = models.DateTimeField(default=TimeUtils.now_utc)  # Ensure UTC storage
 
+    scheduled_override_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Keep creating normal price-based assignments until this UTC time",
+    )
+    force_on = models.BooleanField(
+        default=False,
+        help_text="Continuously queue the next period so the device remains on",
+    )
+    force_off = models.BooleanField(
+        default=False,
+        help_text="Keep the device off while preserving its normal assignments",
+    )
+
     # New field for how many hours the device should run daily
     run_hours_per_day = models.IntegerField(
         default=0, help_text="Set how many hours the device should run daily (0-24)"
@@ -371,6 +385,8 @@ class DeviceAssignment(models.Model):
         ("cheapest", "Cheapest Hours"),
         ("threshold", "Price Threshold"),
         ("forced_min", "Forced — Min Temperature"),
+        ("scheduled_override", "Scheduled Override"),
+        ("force_on", "Force Device On"),
         ("manual", "Manual"),
         ("removed_overheat", "Removed — Overheating"),
         ("removed_headroom", "Removed — Headroom"),

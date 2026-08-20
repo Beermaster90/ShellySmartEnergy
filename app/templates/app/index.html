@@ -103,6 +103,125 @@
                 min-width: 60px;
             }
 
+            .device-override-panel {
+                margin-top: 18px;
+                padding: 14px;
+                border: 1px solid #d9e2ea;
+                border-radius: 8px;
+                background: #f7f9fb;
+            }
+
+            .override-panel-heading {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 10px;
+            }
+
+            .override-panel-heading strong {
+                color: #2c3e50;
+                font-size: 16px;
+            }
+
+            .override-panel-heading span {
+                color: #6c7a89;
+                font-size: 13px;
+            }
+
+            .device-override-controls {
+                display: flex;
+                flex-wrap: nowrap;
+                align-items: stretch;
+                gap: 10px;
+                width: 100%;
+            }
+
+            .device-override-controls select,
+            .device-override-controls button {
+                height: 40px;
+                border-radius: 6px;
+                font-size: 14px;
+            }
+
+            .device-override-controls select {
+                flex: 0 0 135px;
+                padding: 0 10px;
+                border: 1px solid #b8c4ce;
+                background: white;
+                color: #2c3e50;
+            }
+
+            .override-action-button {
+                flex: 1 1 0;
+                min-width: 0;
+                padding: 0 12px;
+                border: 1px solid transparent;
+                color: white;
+                font-weight: 600;
+                white-space: nowrap;
+                cursor: pointer;
+                transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+            }
+
+            .override-action-button:hover:not(:disabled) {
+                transform: translateY(-1px);
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.16);
+            }
+
+            .override-action-button:disabled {
+                cursor: wait;
+                opacity: 0.65;
+            }
+
+            #scheduledOverrideButton {
+                background: #337ab7;
+                border-color: #2e6da4;
+            }
+
+            #forceOnButton {
+                background: #3b8f5a;
+                border-color: #327b4d;
+            }
+
+            #forceOffButton {
+                background: #c6534d;
+                border-color: #ad4641;
+            }
+
+            .force-on-active,
+            .force-off-active {
+                box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.75), 0 0 0 2px rgba(0, 0, 0, 0.12);
+            }
+
+            #deviceOverrideStatus {
+                min-height: 18px;
+                margin-top: 10px;
+                color: #566573;
+                font-size: 13px;
+            }
+
+            @media (max-width: 720px) {
+                .override-panel-heading {
+                    display: block;
+                }
+
+                .override-panel-heading span {
+                    display: block;
+                    margin-top: 3px;
+                }
+
+                .device-override-controls {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                }
+
+                .device-override-controls select,
+                .override-action-button {
+                    width: 100%;
+                }
+            }
+
             /* Toggle Switch Styles - Made Smaller */
             .toggle-switch {
                 position: relative;
@@ -183,6 +302,9 @@
                     data-auto-assign-threshold="{{ device.auto_assign_price_threshold }}"
                     data-cheapest-hours="{{ device.cheapest_hours|join:',' }}"
                     data-device-status="{{ device.status }}"
+                    data-scheduled-override-until="{% if device.scheduled_override_until %}{{ device.scheduled_override_until|date:'c' }}{% endif %}"
+                    data-force-on="{{ device.force_on|yesno:'true,false' }}"
+                    data-force-off="{{ device.force_off|yesno:'true,false' }}"
                     data-thermostat-name="{% if device.thermostat_device %}{{ device.thermostat_device.familiar_name }}{% endif %}"
                     data-thermostat-min-winter="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_winter }}{% endif %}"
                     data-thermostat-min-summer="{% if device.thermostat_device %}{{ device.thermostat_device.min_temperature_summer }}{% endif %}"
@@ -261,6 +383,25 @@
                     <p><strong>Your Timezone:</strong> {{ user_timezone }}</p>
                 </div>
             </div>
+
+            <div id="deviceOverrideControls" class="device-override-panel">
+                <div class="override-panel-heading">
+                    <strong>Device Overrides</strong>
+                    <span>Choose one temporary operating mode for this device</span>
+                </div>
+                <div class="device-override-controls">
+                    <select id="scheduledOverrideDuration" aria-label="Override duration">
+                        <option value="12">12 hours</option>
+                        <option value="24">1 day</option>
+                        <option value="48">2 days</option>
+                        <option value="120">5 days</option>
+                    </select>
+                    <button type="button" class="override-action-button" id="scheduledOverrideButton" onclick="setScheduledOverride()">Apply Timed Override</button>
+                    <button type="button" class="override-action-button" id="forceOnButton" onclick="toggleForceOn()">Force Device On</button>
+                    <button type="button" class="override-action-button" id="forceOffButton" onclick="toggleForceOff()">Force Device Off</button>
+                </div>
+                <div id="deviceOverrideStatus"></div>
+            </div>
         </div>
 
         <!-- EV Charger live status panel (shown only when an EV charger is selected) -->
@@ -311,7 +452,7 @@
                     <th>Price (c/kWh)</th>
                     <th>Total Price (c/kWh)</th>
                     <th>Assigned</th>
-                    <th title="Forced ON by min temperature override">Forced</th>
+                    <th title="Forced ON by min temperature or Force Device On override">Forced</th>
                     <th title="Removed by thermostat overheating or headroom zone">Removed</th>
                 </tr>
             </thead>
@@ -462,6 +603,12 @@
                         // Update the data attribute
                         const selectedOption = deviceSelect.options[deviceSelect.selectedIndex];
                         selectedOption.setAttribute('data-device-status', data.enabled ? '1' : '0');
+                        if (!data.enabled && selectedOption.getAttribute('data-device-type') !== 'ev') {
+                            selectedOption.setAttribute('data-force-on', 'false');
+                            selectedOption.setAttribute('data-force-off', 'false');
+                            selectedOption.setAttribute('data-scheduled-override-until', '');
+                            updateOverrideControls(selectedOption, false);
+                        }
                         
                         showNotification(data.message, 'success');
                     } else {
@@ -477,6 +624,166 @@
                     document.getElementById("deviceEnabledText").textContent = isEnabled ? "Disabled" : "Enabled";
                     showNotification('Network error occurred', 'error');
                 });
+            }
+
+            function selectedShellyOption() {
+                const select = document.getElementById("deviceSelect");
+                const option = select.options[select.selectedIndex];
+                if (!option || option.getAttribute("data-device-type") === "ev") return null;
+                return option;
+            }
+
+            function setScheduledOverride() {
+                const option = selectedShellyOption();
+                if (!option) {
+                    showNotification('Overrides are available for Shelly devices', 'error');
+                    return;
+                }
+                const duration = parseInt(document.getElementById("scheduledOverrideDuration").value, 10);
+                const button = document.getElementById("scheduledOverrideButton");
+                button.disabled = true;
+                button.textContent = "Applying…";
+
+                fetch('/shellyapp/set-scheduled-device-override/', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({device_id: option.value, duration_hours: duration})
+                })
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to apply override');
+                    option.setAttribute('data-scheduled-override-until', result.data.override_until);
+                    option.setAttribute('data-force-on', 'false');
+                    option.setAttribute('data-force-off', 'false');
+                    option.setAttribute('data-device-status', '1');
+                    document.getElementById("deviceEnabledToggle").checked = true;
+                    document.getElementById("deviceEnabledText").textContent = "Enabled";
+                    document.getElementById("deviceEnabledText").style.color = "green";
+
+                    const assignedPriceIds = new Set(
+                        (result.data.assigned_price_ids || []).map(id => String(id))
+                    );
+                    document.querySelectorAll('.price-row').forEach(row => {
+                        if (!assignedPriceIds.has(row.getAttribute('data-price-id'))) return;
+                        let assignedList = (row.getAttribute('data-assigned') || '')
+                            .split(',')
+                            .map(id => id.trim())
+                            .filter(id => id.length > 0);
+                        if (!assignedList.includes(option.value)) {
+                            assignedList.push(option.value);
+                            row.setAttribute('data-assigned', assignedList.join(','));
+                        }
+                        // Use the same immediate visual result as double-click
+                        // assignment, without waiting for another page request.
+                        const assignedCell = row.querySelector('.assigned');
+                        if (assignedCell) assignedCell.textContent = 'X';
+                    });
+                    showNotification(result.data.message, 'success');
+                    updateOverrideControls(option, false);
+                })
+                .catch(error => showNotification(error.message, 'error'))
+                .finally(() => {
+                    button.disabled = false;
+                    button.textContent = "Apply Timed Override";
+                });
+            }
+
+            function toggleForceOn() {
+                const option = selectedShellyOption();
+                if (!option) {
+                    showNotification('Force On is available for Shelly devices', 'error');
+                    return;
+                }
+                const currentlyEnabled = option.getAttribute('data-force-on') === 'true';
+                const button = document.getElementById("forceOnButton");
+                button.disabled = true;
+
+                fetch('/shellyapp/toggle-force-device-on/', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({device_id: option.value, enabled: !currentlyEnabled})
+                })
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to change Force On');
+                    option.setAttribute('data-force-on', result.data.enabled ? 'true' : 'false');
+                    if (result.data.enabled) option.setAttribute('data-force-off', 'false');
+                    option.setAttribute('data-scheduled-override-until', '');
+                    if (result.data.enabled) {
+                        option.setAttribute('data-device-status', '1');
+                        document.getElementById("deviceEnabledToggle").checked = true;
+                        document.getElementById("deviceEnabledText").textContent = "Enabled";
+                        document.getElementById("deviceEnabledText").style.color = "green";
+                    }
+                    showNotification(result.data.message, 'success');
+                    updateOverrideControls(option, false);
+                })
+                .catch(error => showNotification(error.message, 'error'))
+                .finally(() => { button.disabled = false; });
+            }
+
+            function toggleForceOff() {
+                const option = selectedShellyOption();
+                if (!option) {
+                    showNotification('Force Off is available for Shelly devices', 'error');
+                    return;
+                }
+                const currentlyEnabled = option.getAttribute('data-force-off') === 'true';
+                const button = document.getElementById("forceOffButton");
+                button.disabled = true;
+
+                fetch('/shellyapp/toggle-force-device-off/', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({device_id: option.value, enabled: !currentlyEnabled})
+                })
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to change Force Off');
+                    option.setAttribute('data-force-off', result.data.enabled ? 'true' : 'false');
+                    if (result.data.enabled) {
+                        option.setAttribute('data-force-on', 'false');
+                        option.setAttribute('data-scheduled-override-until', '');
+                        option.setAttribute('data-device-status', '1');
+                        document.getElementById("deviceEnabledToggle").checked = true;
+                        document.getElementById("deviceEnabledText").textContent = "Enabled";
+                        document.getElementById("deviceEnabledText").style.color = "green";
+                    }
+                    showNotification(result.data.message, 'success');
+                    updateOverrideControls(option, false);
+                })
+                .catch(error => showNotification(error.message, 'error'))
+                .finally(() => { button.disabled = false; });
+            }
+
+            function updateOverrideControls(option, isEV) {
+                const controls = document.getElementById("deviceOverrideControls");
+                const status = document.getElementById("deviceOverrideStatus");
+                if (isEV) {
+                    controls.style.display = "none";
+                    status.textContent = "";
+                    return;
+                }
+                controls.style.display = "block";
+                const forceOn = option.getAttribute('data-force-on') === 'true';
+                const forceOff = option.getAttribute('data-force-off') === 'true';
+                const overrideUntilText = option.getAttribute('data-scheduled-override-until') || '';
+                const forceButton = document.getElementById("forceOnButton");
+                const forceOffButton = document.getElementById("forceOffButton");
+                forceButton.textContent = forceOn ? "Turn Force On Off" : "Force Device On";
+                forceButton.classList.toggle('force-on-active', forceOn);
+                forceOffButton.textContent = forceOff ? "Release Force Off" : "Force Device Off";
+                forceOffButton.classList.toggle('force-off-active', forceOff);
+
+                if (forceOn) {
+                    status.textContent = "Force On is active; one upcoming period is always queued.";
+                } else if (forceOff) {
+                    status.textContent = "Force Off is active; the current and one upcoming assignment are removed on each scheduler pass.";
+                } else if (overrideUntilText && new Date(overrideUntilText) > new Date()) {
+                    status.textContent = "Normal scheduled behavior overridden through " + new Date(overrideUntilText).toLocaleString() + ".";
+                } else {
+                    status.textContent = "No device override active.";
+                }
             }
 
             function updateDeviceData() {
@@ -495,6 +802,8 @@
                 let autoAssignThreshold = parseFloat(selectedOption.getAttribute("data-auto-assign-threshold")) || 0;
                 let hoursNeeded = parseInt(selectedOption.getAttribute("data-hours-needed")) || 0;
                 let deviceStatus = parseInt(selectedOption.getAttribute("data-device-status")) || 0;
+
+                updateOverrideControls(selectedOption, isEV);
 
                 document.getElementById("dayPriceText").innerText = dayPrice.toFixed(2);
                 document.getElementById("nightPriceText").innerText = nightPrice.toFixed(2);

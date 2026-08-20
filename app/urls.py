@@ -39,6 +39,21 @@ urlpatterns = [
         "toggle-device-status/", views.toggle_device_status, name="toggle_device_status"
     ),  # AJAX endpoint for toggling device automation status
     path(
+        "set-scheduled-device-override/",
+        views.set_scheduled_device_override,
+        name="set_scheduled_device_override",
+    ),
+    path(
+        "toggle-force-device-on/",
+        views.toggle_force_device_on,
+        name="toggle_force_device_on",
+    ),
+    path(
+        "toggle-force-device-off/",
+        views.toggle_force_device_off,
+        name="toggle_force_device_off",
+    ),
+    path(
         "ev-charger-energy/", ev_charger_energy_history, name="ev_charger_energy_history"
     ),  # AJAX endpoint for EV charger energy history
     path(

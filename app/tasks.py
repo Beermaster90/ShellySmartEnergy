@@ -28,6 +28,7 @@ from app.price_views import call_fetch_prices, get_cheapest_hours
 from .logger import log_device_event, log_ev_event
 from app.utils.time_utils import TimeUtils
 from app.utils.db_utils import with_db_retries
+from app.device_override_manager import DeviceOverrideManager
 import pytz
 from typing import Optional
 
@@ -55,6 +56,8 @@ class DeviceController:
         """Loops through all Shelly devices and toggles them based on pre-assigned cheapest 15-minute periods."""
         try:
             current_time = TimeUtils.now_utc()
+            # Extend persistent user overrides before the upcoming period starts.
+            DeviceOverrideManager.maintain_all(now_utc=current_time)
             
             # Find the current 15-minute period
             current_minutes = current_time.minute
@@ -217,7 +220,14 @@ class DeviceController:
             ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).exists()
 
             # Thermostat temperature overrides
-            if device.thermostat_device_id:
+            if device.force_off:
+                assigned = False
+                log_device_event(
+                    device,
+                    f"Force Device Off active for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC.",
+                    "INFO",
+                )
+            elif device.thermostat_device_id:
                 thermostat = device.thermostat_device
                 if thermostat and thermostat.temperature_updated_at:
                     now_utc = TimeUtils.now_utc()
