@@ -174,6 +174,9 @@ class ThermostatAssignmentManager:
             device.night_transfer_price,
             minimum_hours,
             price_threshold=None,
+            block_scheduling=device.block_scheduling,
+            min_run_block_minutes=device.min_run_block_minutes,
+            switch_on_cost=device.switch_on_cost,
         )
         protected_periods = {
             TimeUtils.to_utc(period).strftime("%Y-%m-%d %H:%M")

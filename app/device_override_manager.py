@@ -97,6 +97,9 @@ class DeviceOverrideManager:
                 device.auto_assign_price_threshold,
                 local_tz=user_tz,
                 return_tagged=True,
+                block_scheduling=device.block_scheduling,
+                min_run_block_minutes=device.min_run_block_minutes,
+                switch_on_cost=device.switch_on_cost,
             )
             price_by_minute = {
                 TimeUtils.to_utc(price["start_time"]).replace(second=0, microsecond=0): price

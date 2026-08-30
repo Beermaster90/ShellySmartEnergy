@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 from django.contrib.auth.models import User
 from app.utils.time_utils import TimeUtils
@@ -5,6 +7,19 @@ from django.conf import settings
 import pytz
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+
+
+RUN_BLOCK_LENGTH_CHOICES = [
+    (15, "No minimum"),
+    (30, "30 minutes"),
+    (45, "45 minutes"),
+    (60, "1 hour"),
+]
+
+# Switching a device on costs this much on top of the periods it books, expressed
+# in the same c/kWh units as one 15-minute period. It is what stops the scheduler
+# chasing savings too small to be worth an extra start.
+DEFAULT_SWITCH_ON_COST = Decimal("1.0")
 
 
 class AppSetting(models.Model):
@@ -65,6 +80,34 @@ class ShellyDevice(models.Model):
         default=0,
         help_text="Minimum hours to keep assigned from the cheapest periods (0-24)",
     )
+
+    block_scheduling = models.BooleanField(
+        default=True,
+        verbose_name="Block scheduling",
+        help_text=(
+            "Book the daily run time as a few long continuous runs in the cheapest "
+            "stretches instead of scattered 15-minute periods"
+        ),
+    )
+
+    switch_on_cost = models.DecimalField(
+        max_digits=4,
+        decimal_places=1,
+        default=DEFAULT_SWITCH_ON_COST,
+        verbose_name="Switch-on cost (c/kWh)",
+        help_text=(
+            "Price charged for every switch-on, in the same units as one 15-minute "
+            "period. Higher means fewer, longer runs. 0 disables smoothing."
+        ),
+    )
+
+    min_run_block_minutes = models.IntegerField(
+        default=30,
+        choices=RUN_BLOCK_LENGTH_CHOICES,
+        verbose_name="Minimum run block",
+        help_text="Never book a run shorter than this when block scheduling is on",
+    )
+
 
     # New fields for transfer prices
     day_transfer_price = models.DecimalField(
@@ -255,6 +298,30 @@ class EVCharger(models.Model):
     )
     run_hours_per_day = models.IntegerField(
         default=0, help_text="Hours to charge per day (0 = no automatic scheduling)"
+    )
+    block_scheduling = models.BooleanField(
+        default=True,
+        verbose_name="Block scheduling",
+        help_text=(
+            "Book the daily charging time as a few long continuous runs in the "
+            "cheapest stretches instead of scattered 15-minute periods"
+        ),
+    )
+    switch_on_cost = models.DecimalField(
+        max_digits=4,
+        decimal_places=1,
+        default=DEFAULT_SWITCH_ON_COST,
+        verbose_name="Switch-on cost (c/kWh)",
+        help_text=(
+            "Price charged for every switch-on, in the same units as one 15-minute "
+            "period. Higher means fewer, longer charging runs. 0 disables smoothing."
+        ),
+    )
+    min_run_block_minutes = models.IntegerField(
+        default=30,
+        choices=RUN_BLOCK_LENGTH_CHOICES,
+        verbose_name="Minimum charging block",
+        help_text="Never book a charging run shorter than this when block scheduling is on",
     )
     day_transfer_price = models.DecimalField(
         max_digits=6, decimal_places=1, default=0,

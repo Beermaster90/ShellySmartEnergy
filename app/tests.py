@@ -19,8 +19,15 @@ from app.models import (
     DeviceLog,
     ElectricityPrice,
     EVCharger,
+    EVChargerAssignment,
     ShellyDevice,
     ShellyTemperature,
+)
+from app.price_views import (
+    get_cheapest_hours,
+    plan_run_slots,
+    select_price_slots,
+    set_cheapest_hours,
 )
 from app.services.tuya_ev_charger_service import TuyaEVChargerService
 from app.thermostat_manager import ThermostatAssignmentManager
@@ -550,3 +557,234 @@ class ThermostatAssignmentManagerTest(TestCase):
         ).first()
         self.assertIsNotNone(assignment)
         self.assertEqual(assignment.assignment_type, "removed_overheat")
+
+
+class BlockSchedulingTest(SimpleTestCase):
+    """Block scheduling trades a little money for far fewer switch-ons."""
+
+    START = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+
+    def build_prices(self, prices):
+        return [
+            {
+                "id": index,
+                "start_time": self.START + timedelta(minutes=15 * index),
+                "price_kwh": Decimal(str(price)),
+            }
+            for index, price in enumerate(prices)
+        ]
+
+    def slot_indexes(self, slots):
+        return sorted(int((slot - self.START).total_seconds() // 900) for slot in slots)
+
+    def smoothed(self, prices, hours_needed=1, switch_on_cost=1.0, min_block=30):
+        # These fixtures use far wider price spreads than real days, so the
+        # budget is lifted out of the way; the guard has its own test below.
+        return get_cheapest_hours(
+            prices,
+            0,
+            0,
+            hours_needed=hours_needed,
+            block_scheduling=True,
+            min_run_block_minutes=min_block,
+            switch_on_cost=switch_on_cost,
+            max_premium_percent=1000,
+        )
+
+    def test_without_block_scheduling_slots_are_scattered(self):
+        # Cheap slots deliberately sit at 0, 4, 8 and 12 with expensive gaps.
+        prices = self.build_prices([1, 9, 9, 9, 1, 9, 9, 9, 1, 9, 9, 9, 1, 9, 9, 9])
+
+        slots = get_cheapest_hours(prices, 0, 0, hours_needed=1)
+
+        self.assertEqual(self.slot_indexes(slots), [0, 4, 8, 12])
+
+    def test_switch_on_cost_pulls_slots_into_one_run(self):
+        # Slot 0 is the single cheapest period, but taking it costs an extra
+        # switch-on that the neighbouring cheap hour does not.
+        prices = self.build_prices([1, 9, 9, 9, 2, 2, 2, 2, 9, 9, 9, 9, 3, 3, 3, 3])
+
+        slots = self.smoothed(prices)
+
+        self.assertEqual(self.slot_indexes(slots), [4, 5, 6, 7])
+
+    def test_a_big_enough_saving_still_wins_a_second_run(self):
+        # Two clearly separate cheap valleys: worth paying to start twice.
+        prices = self.build_prices([9, 9, 1, 1, 1, 1, 9, 9, 9, 9, 1, 1, 1, 1, 9, 9])
+
+        slots = self.smoothed(prices, hours_needed=2)
+
+        self.assertEqual(self.slot_indexes(slots), [2, 3, 4, 5, 10, 11, 12, 13])
+
+    def test_zero_switch_on_cost_matches_plain_selection(self):
+        prices = self.build_prices([1, 9, 9, 9, 1, 9, 9, 9, 1, 9, 9, 9, 1, 9, 9, 9])
+
+        plain = get_cheapest_hours(prices, 0, 0, hours_needed=1)
+        smoothed = self.smoothed(prices, switch_on_cost=0.0, min_block=15)
+
+        self.assertEqual(self.slot_indexes(smoothed), self.slot_indexes(plain))
+
+    def test_minimum_run_block_rules_out_lone_periods(self):
+        # Slot 5 is an isolated cheap period a 30-minute minimum cannot use.
+        prices = self.build_prices([9, 2, 2, 2, 9, 1, 9, 2, 2, 2, 9, 9, 9, 9, 9, 9])
+
+        slots = self.smoothed(prices, switch_on_cost=0.0, min_block=30)
+
+        self.assertNotIn(5, self.slot_indexes(slots))
+        self.assertEqual(len(slots), 4)
+
+    def test_does_not_join_a_run_across_a_price_gap(self):
+        prices = self.build_prices([1, 1, 1, 1, 1, 1, 1, 1])
+        # Drop slots 2 and 3 so slots 0-1 and 4-7 are not back-to-back.
+        prices = [entry for entry in prices if entry["id"] not in (2, 3)]
+
+        slots = self.smoothed(prices)
+
+        self.assertEqual(self.slot_indexes(slots), [4, 5, 6, 7])
+
+    def test_threshold_slots_are_still_added(self):
+        prices = self.build_prices([9, 9, 1, 1, 1, 1, 9, 9, 0, 9, 9, 9, 9, 9, 9, 9])
+
+        tagged = get_cheapest_hours(
+            prices,
+            0,
+            0,
+            hours_needed=1,
+            price_threshold=Decimal("0.5"),
+            block_scheduling=True,
+            return_tagged=True,
+            max_premium_percent=1000,
+        )
+
+        by_type = {}
+        for slot, assignment_type in tagged:
+            by_type.setdefault(assignment_type, []).append(slot)
+
+        self.assertEqual(self.slot_indexes(by_type["cheapest"]), [2, 3, 4, 5])
+        self.assertEqual(self.slot_indexes(by_type["threshold"]), [8])
+
+    def test_smoothing_is_skipped_when_it_costs_too_much(self):
+        # Scattered cheap slots with a brutal penalty for running between them:
+        # smoothing here would blow far past the 5% budget, so it must not apply.
+        prices = self.build_prices([1, 90, 90, 90, 1, 90, 90, 90, 1, 90, 90, 90, 1, 9, 9, 9])
+
+        plan = plan_run_slots(
+            prices, 0, 0, hours_needed=1, block_scheduling=True, switch_on_cost=50.0
+        )
+
+        self.assertTrue(plan.over_budget)
+        self.assertFalse(plan.smoothed)
+        self.assertEqual(self.slot_indexes(s for s, _t in plan.slots), [0, 4, 8, 12])
+
+    def test_plan_reports_the_premium_it_paid(self):
+        prices = self.build_prices([1, 9, 9, 9, 2, 2, 2, 2, 9, 9, 9, 9, 3, 3, 3, 3])
+
+        plan = plan_run_slots(
+            prices,
+            0,
+            0,
+            hours_needed=1,
+            block_scheduling=True,
+            switch_on_cost=1.0,
+            max_premium_percent=1000,
+        )
+
+        self.assertTrue(plan.smoothed)
+        self.assertEqual(plan.chosen_runs, 1)
+        self.assertLess(plan.chosen_runs, plan.plain_runs)
+        self.assertGreater(plan.premium_percent, 0)
+
+    def test_selection_is_cost_optimal_not_merely_greedy(self):
+        # A greedy pass that grabs the single cheapest window first would take
+        # slots 4-7 and then be unable to reach the true optimum.
+        values = [5, 1, 1, 5, 1, 1, 1, 1, 5, 1, 1, 5, 9, 9, 9, 9]
+        prices = self.build_prices(values)
+        ordered = [
+            (Decimal(str(entry["price_kwh"])), entry["start_time"]) for entry in prices
+        ]
+        periods, switch_cost, min_block = 8, Decimal("1.0"), 2
+
+        chosen = select_price_slots(ordered, periods, switch_cost, min_block)
+        indexes = self.slot_indexes(chosen)
+        cost = sum(Decimal(str(values[i])) for i in indexes) + switch_cost * len(
+            [i for n, i in enumerate(indexes) if n == 0 or i - indexes[n - 1] != 1]
+        )
+
+        # Brute force every legal selection and confirm the DP found the best.
+        import itertools
+
+        best = None
+        for combo in itertools.combinations(range(len(values)), periods):
+            runs, ok = [], True
+            for index in combo:
+                if runs and index == runs[-1][-1] + 1:
+                    runs[-1].append(index)
+                else:
+                    runs.append([index])
+            if any(len(run) < min_block for run in runs):
+                continue
+            total = sum(Decimal(str(values[i])) for i in combo) + switch_cost * len(runs)
+            if best is None or total < best:
+                best = total
+
+        self.assertEqual(len(chosen), periods)
+        self.assertEqual(cost, best)
+
+
+class EVChargerBlockSchedulingTest(TestCase):
+    """set_cheapest_hours honours the charger's own block scheduling setting."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="ev-block-user")
+        self.now = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        # A realistic day: one isolated cheapest period, and a slightly dearer
+        # but continuous cheap hour. Spreads are small enough that smoothing
+        # stays inside the real cost guard.
+        curve = [5.0, 6, 6, 6, 5.1, 5.1, 5.1, 5.1, 6, 6, 6, 6, 5.2, 6, 6, 6]
+        for index, price in enumerate(curve):
+            start_time = self.now + timedelta(minutes=15 * index)
+            ElectricityPrice.objects.create(
+                start_time=start_time,
+                end_time=start_time + timedelta(minutes=15),
+                price_kwh=Decimal(str(price)),
+            )
+
+    def create_charger(self, block_scheduling):
+        return EVCharger.objects.create(
+            familiar_name="Charger",
+            user=self.user,
+            run_hours_per_day=1,
+            block_scheduling=block_scheduling,
+            min_run_block_minutes=60,
+            day_transfer_price=Decimal("0.0"),
+            night_transfer_price=Decimal("0.0"),
+        )
+
+    def assigned_slot_indexes(self, charger):
+        return sorted(
+            int(
+                (assignment.electricity_price.start_time - self.now).total_seconds()
+                // 900
+            )
+            for assignment in EVChargerAssignment.objects.filter(
+                charger=charger
+            ).select_related("electricity_price")
+        )
+
+    def run_assignment(self):
+        with patch("app.price_views.TimeUtils.now_utc", return_value=self.now):
+            set_cheapest_hours()
+
+    def test_block_scheduling_off_assigns_scattered_slots(self):
+        charger = self.create_charger(block_scheduling=False)
+
+        self.run_assignment()
+
+        self.assertEqual(self.assigned_slot_indexes(charger), [0, 4, 5, 6])
+
+    def test_block_scheduling_on_assigns_one_continuous_hour(self):
+        charger = self.create_charger(block_scheduling=True)
+
+        self.run_assignment()
+
+        self.assertEqual(self.assigned_slot_indexes(charger), [4, 5, 6, 7])

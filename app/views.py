@@ -418,6 +418,9 @@ def admin_test_page(request: HttpRequest):
                     device.run_hours_per_day,
                     device.auto_assign_price_threshold,
                     local_tz,
+                    block_scheduling=device.block_scheduling,
+                    min_run_block_minutes=device.min_run_block_minutes,
+                    switch_on_cost=device.switch_on_cost,
                 )
                 assigned_count = 0
                 for hour in cheapest_hours:
@@ -461,6 +464,9 @@ def admin_test_page(request: HttpRequest):
                     charger.run_hours_per_day,
                     charger.auto_assign_price_threshold,
                     local_tz,
+                    block_scheduling=charger.block_scheduling,
+                    min_run_block_minutes=charger.min_run_block_minutes,
+                    switch_on_cost=charger.switch_on_cost,
                 )
                 assigned_count = 0
                 for hour in cheapest_hours:
