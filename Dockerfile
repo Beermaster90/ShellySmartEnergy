@@ -2,6 +2,7 @@
 FROM python:3.11-slim AS builder
 
 # Install build dependencies
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -30,6 +31,7 @@ ARG VERSION=1.0.0
 ARG BUILD_DATE=unknown
 
 # Install only runtime dependencies (minimal)
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
 RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
@@ -114,17 +116,17 @@ rm -f /data/.test_write\n\
 if [ ! -f "/data/db.sqlite3" ]; then\n\
     echo "Initializing database at /data/db.sqlite3..."\n\
     python manage.py migrate\n\
-    echo "Creating admin user..."\n\
-    python create_test_user.py\n\
     echo "Database initialized successfully."\n\
 else\n\
-    echo "Database exists at /data/db.sqlite3, checking for model changes..."\n\
-    echo "Running migrations..."\n\
+    echo "Database exists at /data/db.sqlite3, running migrations..."\n\
     python manage.py migrate\n\
-    echo "Ensuring admin user exists..."\n\
-    python create_test_user.py\n\
     echo "Migrations completed."\n\
 fi\n\
+\n\
+# Ensure an admin exists. On a fresh DB this creates one with a RANDOM one-time\n\
+# password printed below; if admin already exists nothing changes. Safe to run\n\
+# every start because there is no hardcoded default password.\n\
+python create_test_user.py\n\
 \n\
 echo "Final database status:"\n\
 ls -la /data/db.sqlite3 || echo "Database file not found!"\n\

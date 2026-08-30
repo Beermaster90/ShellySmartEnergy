@@ -1,0 +1,33 @@
+# Cloudflare Tunnel configuration for ShellySmartEnergy.
+#
+# ONLY needed for a LOCALLY-MANAGED tunnel. Cloudflare now recommends
+# remotely-managed tunnels (created and configured in the Zero Trust dashboard,
+# connector run from a token) — for that path you do NOT use this file at all;
+# the ingress is set under the tunnel's "Public Hostname" tab. See DEPLOYMENT.md
+# section 3. Use this file only if you deliberately want the routing in git.
+#
+# Install to ~/.cloudflared/config.yml (rootless) or /etc/cloudflared/config.yml.
+# Replace the tunnel UUID and hostname with your own.
+#
+# The tunnel dials OUT to Cloudflare, so no inbound port is ever opened on your
+# router and your home IP address never appears in public DNS.
+
+tunnel: REPLACE-WITH-TUNNEL-UUID
+credentials-file: /home/REPLACE-WITH-USER/.cloudflared/REPLACE-WITH-TUNNEL-UUID.json
+
+# Do not let the tunnel reach anything except this one app. The catch-all
+# http_status:404 rule at the end is what enforces that — without it, a tunnel
+# can be pointed at any service on the host.
+ingress:
+  - hostname: energypilot.domain.com
+    service: http://127.0.0.1:8000
+    originRequest:
+      # The app is plain HTTP on loopback; cloudflared terminates TLS publicly
+      # and sets X-Forwarded-Proto, which Django reads via SECURE_PROXY_SSL_HEADER.
+      httpHostHeader: energypilot.domain.com
+      connectTimeout: 30s
+      # Fail fast rather than hanging if gunicorn is restarting.
+      noHappyEyeballs: true
+
+  # Everything else is refused.
+  - service: http_status:404

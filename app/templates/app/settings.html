@@ -1,0 +1,69 @@
+{% extends "app/layout.html" %}
+
+{% block content %}
+<div class="container" style="max-width: 900px;">
+    <h2>Settings</h2>
+    <p class="text-muted">Edit the devices, thermostats and chargers you own.</p>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-success">{{ message }}</div>
+        {% endfor %}
+    {% endif %}
+
+    <h3>Shelly devices
+        <a href="{% url 'settings_add_device' %}" class="btn btn-primary btn-sm" style="float:right;">+ Add device</a>
+    </h3>
+    {% if settings_devices %}
+        <ul class="list-group" style="margin-bottom: 24px;">
+            {% for device in settings_devices %}
+                <li class="list-group-item">
+                    <a href="{% url 'settings_device' device.device_id %}">{{ device.familiar_name }}</a>
+                    <span class="text-muted">
+                        — {{ device.run_hours_per_day }} h/day,
+                        {% if device.block_scheduling %}block scheduling on{% else %}block scheduling off{% endif %},
+                        automation {% if device.status == 1 %}enabled{% else %}disabled{% endif %}
+                    </span>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p class="text-muted">No devices.</p>
+    {% endif %}
+
+    <h3>Thermostats
+        <a href="{% url 'settings_add_thermostat' %}" class="btn btn-primary btn-sm" style="float:right;">+ Add thermostat</a>
+    </h3>
+    {% if settings_thermostats %}
+        <ul class="list-group" style="margin-bottom: 24px;">
+            {% for thermostat in settings_thermostats %}
+                <li class="list-group-item">
+                    <a href="{% url 'settings_thermostat' thermostat.device_id %}">{{ thermostat.familiar_name }}</a>
+                    <span class="text-muted">— max {{ thermostat.max_temperature }} °C</span>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p class="text-muted">No thermostats.</p>
+    {% endif %}
+
+    <h3>EV chargers
+        <a href="{% url 'settings_add_charger' %}" class="btn btn-primary btn-sm" style="float:right;">+ Add charger</a>
+    </h3>
+    {% if settings_chargers %}
+        <ul class="list-group" style="margin-bottom: 24px;">
+            {% for charger in settings_chargers %}
+                <li class="list-group-item">
+                    <a href="{% url 'settings_charger' charger.id %}">{{ charger.familiar_name }}</a>
+                    <span class="text-muted">
+                        — {{ charger.run_hours_per_day }} h/day,
+                        automation {% if charger.status == 1 %}enabled{% else %}disabled{% endif %}
+                    </span>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p class="text-muted">No EV chargers.</p>
+    {% endif %}
+</div>
+{% endblock %}

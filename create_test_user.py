@@ -1,6 +1,13 @@
 #!/usr/bin/env python
+"""Bootstrap the admin account and permission group on first container start.
+
+On a fresh database this creates the initial `admin` superuser with a RANDOM,
+one-time password and prints it clearly so the operator can capture it from the
+container logs. It never overwrites an existing admin's password. There is no
+hardcoded default password — nothing to guess on a public deployment.
+"""
 import os
-import sys
+import secrets
 import django
 
 # Setup Django environment
@@ -9,6 +16,8 @@ django.setup()
 
 from django.contrib.auth.models import User, Group, Permission
 from django.contrib.contenttypes.models import ContentType
+
+ADMIN_USERNAME = "admin"
 
 
 def setup_commoneers_group():
@@ -36,20 +45,41 @@ def setup_commoneers_group():
             except Permission.DoesNotExist:
                 print(f"  - Permission not found: {codename} for model {model}")
 
-def create_test_user():
-    """Create a simple test user for testing the UI."""
+def _reset_hint() -> str:
+    return (
+        "  To reset it later, run on the host:\n"
+        "    docker exec -it django-shelly-prod python manage.py changepassword admin\n"
+        "  (podman: swap 'docker' for 'podman')"
+    )
 
-    # Try to get existing admin user and print info
-    admin_user = User.objects.filter(username="admin").first()
+
+def ensure_admin_user():
+    """Ensure an 'admin' superuser exists; on first creation use a random password.
+
+    No hardcoded default password is ever set, so a fresh public deployment has
+    no guessable admin. The generated password is printed once — capture it from
+    the container logs, then log in and change it.
+    """
+    admin_user = User.objects.filter(username=ADMIN_USERNAME).first()
     if admin_user:
-        print(f"✅ Admin user already exists: {admin_user.username}")
-        print("✅ Skipping password reset to preserve existing password")
-    else:
-        print("👤 Creating new admin user")
-        User.objects.create_superuser("admin", "admin@example.com", "admin123")
-        print("✅ Created admin user with password 'admin123'")
+        print(f"✅ Admin user '{ADMIN_USERNAME}' already exists — password left unchanged.")
+        print(_reset_hint())
+        return
+
+    # secrets.token_urlsafe(18) -> ~24 chars, URL-safe, high entropy.
+    password = secrets.token_urlsafe(18)
+    User.objects.create_superuser(ADMIN_USERNAME, "", password)
+
+    # Fixed sentinels so the install scripts can extract this block from logs.
+    print(">>>>> INITIAL ADMIN CREDENTIALS >>>>>")
+    print(f"  username: {ADMIN_USERNAME}")
+    print(f"  password: {password}")
+    print("")
+    print("  This password is shown ONCE. Log in, then change it.")
+    print(_reset_hint())
+    print("<<<<< END INITIAL ADMIN CREDENTIALS <<<<<")
 
 
 if __name__ == "__main__":
     setup_commoneers_group()
-    create_test_user()
+    ensure_admin_user()

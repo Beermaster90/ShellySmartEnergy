@@ -1,9 +1,14 @@
-
 #!/bin/bash
-# Build and run Django production Docker container
+# Build and run the Django production container (Docker).
+#
+# For a hardened, rootless deployment prefer podman-prod.sh — the Docker daemon
+# runs as root, so a daemon-level compromise is a host-level compromise.
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deploy-common.sh"
 
 # Create data directory in user's home directory
-DATA_DIR="$HOME/ShellySmartEnergy/data"
+DATA_DIR="${DATA_DIR:-$HOME/ShellySmartEnergy/data}"
 if [ ! -d "$DATA_DIR" ]; then
   mkdir -p "$DATA_DIR"
 fi
@@ -12,7 +17,8 @@ sudo chown "$(id -u)":"$(id -g)" "$DATA_DIR"
 docker image prune -f
 
 echo "Database file location: $DATA_DIR/db.sqlite3"
-echo "Django production server is running at: http://127.0.0.1:8000"
+echo "Listening on:   $BIND_ADDRESS:$BIND_PORT"
+echo "Reachable at:   $PUBLIC_URL"
 
 VERSION=$(cat VERSION)
 BUILD_DATE=$(date +%Y%m%d-%H%M%S)
@@ -48,12 +54,26 @@ if [ -s "$SECRET_KEY_FILE" ]; then
 fi
 echo "Building with VERSION=$VERSION and BUILD_DATE=$BUILD_DATE"
 docker build --build-arg VERSION=$VERSION --build-arg BUILD_DATE=$BUILD_DATE -t django-shelly-prod:$TAG .
-# Run the container
+# Run the container. The port is bound to loopback so only cloudflared (running
+# on this host) can reach it — see deploy-common.sh.
 docker run -d \
-  -p 8000:8000 \
-  --name $CONTAINER_NAME \
+  -p "$BIND_ADDRESS:$BIND_PORT:8000" \
+  --name "$CONTAINER_NAME" \
   --restart unless-stopped \
   --user "$(id -u):$(id -g)" \
-  -e DJANGO_SECRET_KEY_FILE=/data/.django_secret_key \
+  "${HARDENING_ARGS[@]}" \
+  "${APP_ENV_ARGS[@]}" \
   -v "$DATA_DIR":/data \
-  django-shelly-prod:$TAG
+  "django-shelly-prod:$TAG"
+
+# Surface the initial admin credentials (printed once on a fresh database).
+echo "Waiting for the container to initialise..."
+sleep 12
+CREDS=$(docker logs "$CONTAINER_NAME" 2>&1 | sed -n '/>>>>> INITIAL ADMIN CREDENTIALS/,/<<<<< END INITIAL ADMIN CREDENTIALS/p')
+echo
+if [ -n "$CREDS" ]; then
+  echo "$CREDS"
+else
+  echo "Admin account already existed — password unchanged."
+  echo "To reset it: docker exec -it $CONTAINER_NAME python manage.py changepassword admin"
+fi

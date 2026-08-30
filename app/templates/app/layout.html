@@ -3,6 +3,8 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {# The CSRF cookie is HttpOnly, so scripts read the token from here instead. #}
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <title>{{ title }} - Shelly Smart Energy</title>
     {% load static %}
     <link rel="stylesheet" type="text/css" href="{% static 'app/content/bootstrap.min.css' %}" />
@@ -32,12 +34,13 @@
                     {% if user.is_authenticated %}
                         <li><a href="{% url 'graphs' %}">Graphs</a></li>
                         <li><a href="{% url 'about' %}">Logs</a></li>
-                        {% if user.is_staff %}
+                        <li><a href="{% url 'settings_home' %}">Settings</a></li>
+                        {% if user.is_superuser %}
                             <li><a href="{% url 'admin_test_page' %}">Admin Test Page</a></li>
                         {% endif %}
                     {% endif %}
                     <li><a href="{% url 'contact' %}">Contact</a></li>
-                    {% if user.is_authenticated %}
+                    {% if user.is_superuser %}
                     <li><a href="{% url 'admin:index' %}">Control Panel</a></li>
                     {% endif %}
                 </ul>

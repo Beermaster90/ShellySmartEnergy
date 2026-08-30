@@ -17,6 +17,18 @@ from app.utils.time_utils import TimeUtils
 import pytz
 
 
+# The Django admin exposes device API keys, transfer prices and the relay
+# kill-switch, so it must be superuser-only. Every account is is_staff=True
+# (set by the User post_save signal), and the admin normally grants access to
+# any staff user — so we tighten the gate to is_superuser here.
+def _superuser_only(request):
+    user = getattr(request, "user", None)
+    return bool(user and user.is_active and user.is_superuser)
+
+
+admin.site.has_permission = _superuser_only
+
+
 ### SHELLY DEVICE ADMIN ###
 class ShellyDeviceAdmin(admin.ModelAdmin):
     list_display = (
@@ -464,7 +476,27 @@ class DeviceAssignmentAdmin(admin.ModelAdmin):
 
 admin.site.register(DeviceAssignment, DeviceAssignmentAdmin)
 
-admin.site.register(AppSetting)
+class AppSettingAdmin(admin.ModelAdmin):
+    """Holds the ENTSO-E API key and the relay kill-switch — superusers only.
+
+    staff_member_required elsewhere only checks is_staff, which every account
+    has, so these permissions are gated explicitly.
+    """
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+
+admin.site.register(AppSetting, AppSettingAdmin)
 
 
 ### EV CHARGER ADMIN ###

@@ -485,6 +485,23 @@
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
         <script>
+            // Django's CSRF cookie is HttpOnly, so the token comes from the
+            // <meta> tag in layout.html. Every state-changing POST must send it.
+            const CSRF_TOKEN = document
+                .querySelector('meta[name="csrf-token"]')
+                .getAttribute('content');
+
+            function postJson(url, payload) {
+                return fetch(url, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': CSRF_TOKEN,
+                    },
+                    body: JSON.stringify(payload),
+                });
+            }
             document.addEventListener("DOMContentLoaded", function () {
                 convertTimesToLocal();
                 updateDeviceData();
@@ -583,15 +600,9 @@
                 // Show loading state
                 document.getElementById("deviceEnabledText").textContent = "Updating...";
 
-                fetch('/shellyapp/toggle-device-status/', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        device_id: selectedDeviceId,
-                        enabled: isEnabled
-                    })
+                postJson('/shellyapp/toggle-device-status/', {
+                    device_id: selectedDeviceId,
+                    enabled: isEnabled
                 })
                 .then(response => response.json())
                 .then(data => {
@@ -644,11 +655,8 @@
                 button.disabled = true;
                 button.textContent = "Applying…";
 
-                fetch('/shellyapp/set-scheduled-device-override/', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({device_id: option.value, duration_hours: duration})
-                })
+                postJson('/shellyapp/set-scheduled-device-override/',
+                    {device_id: option.value, duration_hours: duration})
                 .then(response => response.json().then(data => ({ok: response.ok, data})))
                 .then(result => {
                     if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to apply override');
@@ -698,11 +706,8 @@
                 const button = document.getElementById("forceOnButton");
                 button.disabled = true;
 
-                fetch('/shellyapp/toggle-force-device-on/', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({device_id: option.value, enabled: !currentlyEnabled})
-                })
+                postJson('/shellyapp/toggle-force-device-on/',
+                    {device_id: option.value, enabled: !currentlyEnabled})
                 .then(response => response.json().then(data => ({ok: response.ok, data})))
                 .then(result => {
                     if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to change Force On');
@@ -732,11 +737,8 @@
                 const button = document.getElementById("forceOffButton");
                 button.disabled = true;
 
-                fetch('/shellyapp/toggle-force-device-off/', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({device_id: option.value, enabled: !currentlyEnabled})
-                })
+                postJson('/shellyapp/toggle-force-device-off/',
+                    {device_id: option.value, enabled: !currentlyEnabled})
                 .then(response => response.json().then(data => ({ok: response.ok, data})))
                 .then(result => {
                     if (!result.ok || !result.data.success) throw new Error(result.data.error || 'Unable to change Force Off');
@@ -1024,15 +1026,9 @@
                 row.style.opacity = '0.6';
                 row.style.pointerEvents = 'none';
 
-                fetch('/shellyapp/toggle-assignment/', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        device_id: selectedDeviceId,
-                        price_id: parseInt(priceId)
-                    })
+                postJson('/shellyapp/toggle-assignment/', {
+                    device_id: selectedDeviceId,
+                    price_id: parseInt(priceId)
                 })
                 .then(response => response.json())
                 .then(data => {

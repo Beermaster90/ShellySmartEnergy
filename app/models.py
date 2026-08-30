@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from django.db import models
 from django.contrib.auth.models import User
+from app.fields import EncryptedCharField, EncryptedTextField
+from app.utils.security_utils import validate_outbound_url
 from app.utils.time_utils import TimeUtils
 from django.conf import settings
 import pytz
@@ -24,7 +26,7 @@ DEFAULT_SWITCH_ON_COST = Decimal("1.0")
 
 class AppSetting(models.Model):
     key = models.CharField(max_length=128, unique=True)
-    value = models.TextField()
+    value = EncryptedTextField()  # encrypted at rest (e.g. ENTSO-E API key)
 
     def __str__(self):
         return f"{self.key}: {self.value[:16]}..."
@@ -40,7 +42,7 @@ class AppSetting(models.Model):
 class ShellyDevice(models.Model):
     device_id = models.AutoField(primary_key=True)  # Auto-generated device ID
     familiar_name = models.CharField(max_length=255)  # User-defined familiar name
-    shelly_api_key = models.CharField(max_length=255)  # API key for the device
+    shelly_api_key = EncryptedCharField(max_length=255)  # encrypted at rest
     shelly_device_name = models.CharField(
         max_length=255, blank=True, null=True
     )  # Device name from the API
@@ -139,6 +141,7 @@ class ShellyDevice(models.Model):
     shelly_server = models.URLField(
         max_length=512,
         default="https://yourapiaddress.shelly.cloud",
+        validators=[validate_outbound_url],
         help_text="Base URL of the Shelly server used for device communication",
     )
 
@@ -158,7 +161,7 @@ class ShellyDevice(models.Model):
 class ShellyTemperature(models.Model):
     device_id = models.AutoField(primary_key=True)  # Auto-generated device ID
     familiar_name = models.CharField(max_length=255)  # User-defined familiar name
-    shelly_api_key = models.CharField(max_length=255)  # API key for the device
+    shelly_api_key = EncryptedCharField(max_length=255)  # encrypted at rest
     shelly_device_name = models.CharField(
         max_length=255, blank=True, null=True
     )  # Device name from the API
@@ -171,6 +174,7 @@ class ShellyTemperature(models.Model):
     shelly_server = models.URLField(
         max_length=512,
         default="https://yourapiaddress.shelly.cloud",
+        validators=[validate_outbound_url],
         help_text="Base URL of the Shelly server used for device communication",
     )
     min_temperature_winter = models.DecimalField(
@@ -279,12 +283,13 @@ class EVCharger(models.Model):
     backend = models.CharField(max_length=50, choices=BACKEND_CHOICES, default="tuya")
 
     # Tuya cloud credentials
-    tuya_client_id = models.CharField(max_length=255, blank=True, default="")
-    tuya_client_secret = models.CharField(max_length=255, blank=True, default="")
-    tuya_device_id = models.CharField(max_length=255, blank=True, default="")
+    tuya_client_id = EncryptedCharField(max_length=255, blank=True, default="")
+    tuya_client_secret = EncryptedCharField(max_length=255, blank=True, default="")
+    tuya_device_id = EncryptedCharField(max_length=255, blank=True, default="")
     tuya_base_url = models.URLField(
         max_length=512,
         default="https://openapi.tuyaeu.com",
+        validators=[validate_outbound_url],
         help_text="Regional Tuya OpenAPI URL (e.g. https://openapi.tuyaeu.com for Europe)",
     )
 

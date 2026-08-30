@@ -5,7 +5,7 @@ from django.contrib.auth.decorators import login_required
 from django.db import models
 from django.contrib.auth.views import LoginView
 from django.utils import timezone
-from .models import ElectricityPrice, ShellyDevice, DeviceLog, DeviceAssignment, EVCharger, EVChargerAssignment
+from .models import ElectricityPrice, ShellyDevice, ShellyTemperature, DeviceLog, DeviceAssignment, EVCharger, EVChargerAssignment
 from .price_views import get_cheapest_hours
 from .device_assignment_manager import DeviceAssignmentManager, EVChargerAssignmentManager
 from app.utils.time_utils import TimeUtils
@@ -13,6 +13,7 @@ from typing import Dict, Any
 from django.contrib.auth.models import User
 from django.contrib.auth.models import User
 from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.auth.decorators import user_passes_test
 from django.urls import reverse
 from app.forms import BootstrapAuthenticationForm
 import json
@@ -75,8 +76,9 @@ class CustomLoginView(LoginView):
         response = super().form_valid(form)
         
         if remember_me:
-            # Set session to last 90 days (90 * 24 * 60 * 60 seconds)
-            self.request.session.set_expiry(60 * 60 * 24 * 90)
+            # Bounded by SESSION_COOKIE_AGE so the lifetime of a stolen cookie
+            # is controlled in one place (DJANGO_SESSION_DAYS).
+            self.request.session.set_expiry(settings.SESSION_COOKIE_AGE)
         else:
             # Session expires when browser closes (set expiry to 0)
             self.request.session.set_expiry(0)
@@ -326,13 +328,20 @@ def contact(request: HttpRequest):
     )
 
 
-@staff_member_required
+@user_passes_test(lambda u: u.is_active and u.is_superuser, login_url="/admin/login/")
 def admin_test_page(request: HttpRequest):
-    """Admin test page for triggering backend functionalities."""
+    """Admin test page for triggering backend functionalities. Superuser only —
+    it can start/stop any device and expose status, so staff is not enough."""
     result = None
     assigned_hours = None
-    devices = ShellyDevice.objects.all()
-    ev_chargers = EVCharger.objects.all()
+    # staff_member_required only checks is_staff, which every account has, so
+    # scope the querysets to the caller unless they are a superuser.
+    if request.user.is_superuser:
+        devices = ShellyDevice.objects.all()
+        ev_chargers = EVCharger.objects.all()
+    else:
+        devices = ShellyDevice.objects.filter(user=request.user)
+        ev_chargers = EVCharger.objects.filter(user=request.user)
     prices = ElectricityPrice.objects.order_by("start_time")[:48]  # Show next 48 hours
     time_format = request.POST.get("time_format", "utc")
     local_tz = pytz.timezone("Europe/Helsinki")
@@ -353,6 +362,9 @@ def admin_test_page(request: HttpRequest):
 
             rf = RequestFactory()
             fake_request = rf.get("/fake", {"device_id": device_id})
+            # Carry the real user across so the view's auth and ownership
+            # checks apply to this internal call too.
+            fake_request.user = request.user
             response = fetch_device_status(fake_request)
             if hasattr(response, "content"):
                 result = response.content.decode("utf-8")
@@ -583,11 +595,9 @@ def admin_test_page(request: HttpRequest):
 
 
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 import json
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def toggle_device_assignment(request):
     """
@@ -615,7 +625,7 @@ def toggle_device_assignment(request):
         if is_ev:
             ev_id = int(str(device_id)[3:])
             try:
-                if request.user.is_staff or request.user.is_superuser:
+                if request.user.is_superuser:
                     charger = EVCharger.objects.get(id=ev_id)
                 else:
                     charger = EVCharger.objects.get(id=ev_id, user=request.user)
@@ -625,7 +635,7 @@ def toggle_device_assignment(request):
             if charger.status != 1:
                 return JsonResponse({"success": False, "error": "EV Charger automation is disabled."})
 
-            assignment_user = charger.user if (request.user.is_staff or request.user.is_superuser) else request.user
+            assignment_user = charger.user if request.user.is_superuser else request.user
             assignment = EVChargerAssignment.objects.filter(
                 user=assignment_user, charger=charger, electricity_price=electricity_price
             ).first()
@@ -645,7 +655,7 @@ def toggle_device_assignment(request):
 
         # --- Shelly device ---
         try:
-            if request.user.is_staff or request.user.is_superuser:
+            if request.user.is_superuser:
                 device = ShellyDevice.objects.get(device_id=device_id)
             else:
                 device = ShellyDevice.objects.get(device_id=device_id, user=request.user)
@@ -655,7 +665,7 @@ def toggle_device_assignment(request):
         if device.status != 1:
             return JsonResponse({"success": False, "error": "Device automation is disabled. Enable it first to manage assignments."})
 
-        assignment_user = device.user if (request.user.is_staff or request.user.is_superuser) else request.user
+        assignment_user = device.user if request.user.is_superuser else request.user
 
         assignment = DeviceAssignment.objects.filter(
             user=assignment_user, device=device, electricity_price=electricity_price
@@ -671,7 +681,7 @@ def toggle_device_assignment(request):
             )
             action, assigned = "assigned", True
 
-        if (request.user.is_staff or request.user.is_superuser) and assignment_user != request.user:
+        if request.user.is_superuser and assignment_user != request.user:
             message = f"Device {device.familiar_name} {action} for {assignment_user.username} at {TimeUtils.format_datetime_with_tz(electricity_price.start_time, request.user, '%H:%M')}"
         else:
             message = f"Device {device.familiar_name} {action} for {TimeUtils.format_datetime_with_tz(electricity_price.start_time, request.user, '%H:%M')}"
@@ -684,7 +694,6 @@ def toggle_device_assignment(request):
         return JsonResponse({"success": False, "error": str(e)})
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def toggle_device_status(request):
     """
@@ -757,7 +766,6 @@ def _override_device_for_request(request, device_id):
     return queryset.filter(device_id=device_id).first()
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def set_scheduled_device_override(request):
     if not request.user.is_authenticated:
@@ -797,7 +805,6 @@ def set_scheduled_device_override(request):
         return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def toggle_force_device_on(request):
     if not request.user.is_authenticated:
@@ -818,7 +825,6 @@ def toggle_force_device_on(request):
         return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)
 
 
-@csrf_exempt
 @require_http_methods(["POST"])
 def toggle_force_device_off(request):
     if not request.user.is_authenticated:
@@ -837,3 +843,104 @@ def toggle_force_device_off(request):
         })
     except json.JSONDecodeError:
         return JsonResponse({"success": False, "error": "Invalid JSON data"}, status=400)
+
+
+# ---------------------------------------------------------------------------
+# In-app device settings (replaces per-user access to the Django admin)
+#
+# Every account is is_staff=True but the Django admin is now superuser-only,
+# so owners manage their own devices/thermostats/chargers here instead. Access
+# is scoped to the owner; superusers may edit anything.
+# ---------------------------------------------------------------------------
+from django.contrib import messages
+from django.shortcuts import get_object_or_404, redirect
+from app.forms import (
+    ShellyDeviceSettingsForm,
+    ShellyTemperatureSettingsForm,
+    EVChargerSettingsForm,
+)
+
+
+def _owned_queryset(model, request):
+    """Objects the requesting user may edit: their own, or all for superusers."""
+    qs = model.objects.all()
+    return qs if request.user.is_superuser else qs.filter(user=request.user)
+
+
+@login_required
+def settings_home(request: HttpRequest):
+    """List the current user's devices, thermostats and chargers to edit."""
+    context = get_common_context(request)
+    context.update(
+        {
+            "title": "Settings",
+            "settings_devices": _owned_queryset(ShellyDevice, request).order_by("familiar_name"),
+            "settings_thermostats": _owned_queryset(ShellyTemperature, request).order_by("familiar_name"),
+            "settings_chargers": _owned_queryset(EVCharger, request).order_by("familiar_name"),
+        }
+    )
+    return render(request, "app/settings.html", context)
+
+
+def _edit_object(request, model, form_class, pk, label):
+    """Shared edit flow: load an owned object, bind the form, save on POST."""
+    obj = get_object_or_404(_owned_queryset(model, request), pk=pk)
+    if request.method == "POST":
+        form = form_class(request.POST, instance=obj, user=obj.user)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f"{label} “{obj}” saved.")
+            return redirect("settings_home")
+    else:
+        form = form_class(instance=obj, user=obj.user)
+    context = get_common_context(request)
+    context.update({"title": f"Edit {label}", "form": form, "heading": f"Edit {label}", "object_name": str(obj)})
+    return render(request, "app/settings_edit.html", context)
+
+
+def _add_object(request, form_class, label):
+    """Shared create flow: bind the form and force ownership to the requester."""
+    if request.method == "POST":
+        form = form_class(request.POST, user=request.user)
+        if form.is_valid():
+            obj = form.save(commit=False)
+            obj.user = request.user  # owner is always the creator, never client-supplied
+            obj.save()
+            form.save_m2m()
+            messages.success(request, f"{label} “{obj}” created.")
+            return redirect("settings_home")
+    else:
+        form = form_class(user=request.user)
+    context = get_common_context(request)
+    context.update({"title": f"Add {label}", "form": form, "heading": f"Add {label}", "object_name": ""})
+    return render(request, "app/settings_edit.html", context)
+
+
+@login_required
+def settings_device(request: HttpRequest, pk: int):
+    return _edit_object(request, ShellyDevice, ShellyDeviceSettingsForm, pk, "Device")
+
+
+@login_required
+def settings_thermostat(request: HttpRequest, pk: int):
+    return _edit_object(request, ShellyTemperature, ShellyTemperatureSettingsForm, pk, "Thermostat")
+
+
+@login_required
+def settings_charger(request: HttpRequest, pk: int):
+    return _edit_object(request, EVCharger, EVChargerSettingsForm, pk, "EV charger")
+
+
+@login_required
+def settings_add_device(request: HttpRequest):
+    return _add_object(request, ShellyDeviceSettingsForm, "Device")
+
+
+@login_required
+def settings_add_thermostat(request: HttpRequest):
+    return _add_object(request, ShellyTemperatureSettingsForm, "Thermostat")
+
+
+@login_required
+def settings_add_charger(request: HttpRequest):
+    return _add_object(request, EVChargerSettingsForm, "EV charger")

@@ -7,6 +7,7 @@ from .price_views import call_fetch_prices
 from .graph_views import graphs, get_graph_data, get_temperature_data, get_run_history_data
 from .ev_charger_views import ev_charger_energy_history, ev_charger_refresh_status, ev_charger_monthly_cost, ev_charger_raw_dps
 from django.contrib.auth import views as auth_views
+from django.contrib.auth.decorators import login_required
 
 urlpatterns = [
     path("", views.index, name="index"),  # /shellyapp/ calls index()
@@ -17,7 +18,9 @@ urlpatterns = [
         "toggle-device-output/", toggle_device_output, name="toggle_device_output"
     ),  # page to toggle shelly device output on / off]
     path(
-        "fetch-prices/", call_fetch_prices, name="fetch_prices"
+        # Guarded here rather than on the function: the scheduler calls
+        # call_fetch_prices(None) internally, with no request to authenticate.
+        "fetch-prices/", login_required(call_fetch_prices), name="fetch_prices"
     ),  # fetch electricity prices
     path("graphs/", graphs, name="graphs"),  # Cost comparison graphs page
     path(
@@ -65,4 +68,12 @@ urlpatterns = [
     path(
         "ev-charger-raw-dps/", ev_charger_raw_dps, name="ev_charger_raw_dps"
     ),  # Debug: raw Tuya DP codes for EV charger
+    # In-app settings so owners can add/edit their own devices without the admin.
+    path("settings/", views.settings_home, name="settings_home"),
+    path("settings/device/add/", views.settings_add_device, name="settings_add_device"),
+    path("settings/thermostat/add/", views.settings_add_thermostat, name="settings_add_thermostat"),
+    path("settings/charger/add/", views.settings_add_charger, name="settings_add_charger"),
+    path("settings/device/<int:pk>/", views.settings_device, name="settings_device"),
+    path("settings/thermostat/<int:pk>/", views.settings_thermostat, name="settings_thermostat"),
+    path("settings/charger/<int:pk>/", views.settings_charger, name="settings_charger"),
 ]

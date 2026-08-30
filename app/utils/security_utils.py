@@ -101,3 +101,42 @@ class SecurityUtils:
         if context:
             return f"{context}: {error_msg}"
         return error_msg
+
+
+def validate_outbound_url(value):
+    """Reject server-side-request-forgery targets on user-editable API URLs.
+
+    shelly_server and tuya_base_url are edited by users and then fetched by the
+    server, with the device's API key attached as a query parameter. Without
+    this, a user can point them at cloud metadata (169.254.169.254), at other
+    services on the tunnel host, or at a host they control to capture the key.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    from django.core.exceptions import ValidationError
+
+    parsed = urlparse(value)
+    if parsed.scheme != "https":
+        raise ValidationError("API server URL must use https://")
+    if not parsed.hostname:
+        raise ValidationError("API server URL must include a hostname")
+
+    try:
+        resolved = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror:
+        raise ValidationError(f"Cannot resolve host: {parsed.hostname}")
+
+    for entry in resolved:
+        address = ipaddress.ip_address(entry[4][0])
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+        ):
+            raise ValidationError(
+                f"API server URL must point at a public address, not {address}"
+            )

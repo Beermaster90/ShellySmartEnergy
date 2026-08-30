@@ -1,0 +1,192 @@
+# Secure deployment
+
+This app controls physical relays (heating, water heater, EV charger) and stores
+Shelly and Tuya API credentials in its database. A compromise is not a defaced
+web page — it is control of your home electrics, plus credentials that grant
+that control independently of this app. Deploy it accordingly.
+
+The intended shape:
+
+```
+browser ──HTTPS──> Cloudflare (Access: identity check)
+                        │
+                        │  Cloudflare Tunnel (outbound-only)
+                        ▼
+                   cloudflared  ──HTTP──> 127.0.0.1:8000  (rootless container)
+```
+
+No inbound port is opened. The app is never reachable from the LAN or the
+internet directly — only through the tunnel, and only after Cloudflare Access
+has authenticated the visitor. Django's own login is then a second layer.
+
+---
+
+## 1. Configure
+
+```bash
+cp deploy.env.example deploy.env
+$EDITOR deploy.env          # set APP_DOMAIN=energypilot.domain.com
+```
+
+Setting `APP_DOMAIN` is what switches the app into production mode: secure
+cookies, HSTS, HTTPS redirect, and the right `ALLOWED_HOSTS` and
+`CSRF_TRUSTED_ORIGINS`. Leaving it empty keeps a plain local HTTP setup.
+
+`deploy.env` is gitignored. Never commit it.
+
+The run scripts **refuse to start** if `APP_DOMAIN` is set together with
+`DJANGO_DEBUG=true`.
+
+On a fresh database the container creates the initial `admin` superuser with a
+**random one-time password**, printed once in the startup logs (the run scripts
+surface it at the end). Capture it, log in, and change it. To reset later:
+`docker exec -it django-shelly-prod python manage.py changepassword admin`.
+
+## 2. Run the container
+
+Prefer rootless Podman:
+
+```bash
+sudo apt install podman uidmap
+loginctl enable-linger "$USER"      # keeps it running after you log out
+./podman-prod.sh
+```
+
+Docker still works (`./docker-prod.sh`) and gets the same hardening flags, but
+the Docker daemon runs as root, so a daemon-level compromise is a host-level
+compromise. Rootless Podman has no daemon, and container root maps to an
+unprivileged host UID.
+
+Both scripts apply:
+
+| flag | effect |
+|---|---|
+| `-p 127.0.0.1:8000:8000` | loopback only — nothing on the LAN can reach it |
+| `--cap-drop=ALL` | no Linux capabilities; nothing here needs any |
+| `--security-opt=no-new-privileges` | blocks privilege escalation via setuid |
+| `--read-only` | root filesystem immutable; only `/data` is writable |
+| `--tmpfs /tmp` | the one writable scratch path, `noexec,nosuid` |
+
+The loopback binding is load-bearing. Django trusts `X-Forwarded-Proto` to
+decide a request arrived over HTTPS; anything able to reach the port could forge
+that header. Keep `BIND_ADDRESS=127.0.0.1`.
+
+## 3. Cloudflare Tunnel (remotely-managed — recommended)
+
+Cloudflare now recommends **remotely-managed** tunnels: you create and configure
+the tunnel in the dashboard, and the connector on your box runs from a token.
+The routing (public hostname → local service) lives in the dashboard, so there
+is no local `config.yml` to maintain. This is the simpler path for a single box.
+
+1. Cloudflare **Zero Trust** dashboard (one.dash.cloudflare.com) →
+   **Networks → Tunnels → Create a tunnel** → connector type **Cloudflared** →
+   name it `shelly` → **Save**. (Menu labels shift occasionally; it is the
+   "Tunnels" section under Networks.)
+2. The dashboard shows an install command containing a long token. On the
+   server, install the connector as a system service from that token:
+   ```bash
+   # install the cloudflared package first (see below), then:
+   sudo cloudflared service install eyJhIjoiXXXX...   # the token from the dashboard
+   ```
+   To install the package:
+   ```bash
+   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cf.deb
+   sudo dpkg -i /tmp/cf.deb
+   ```
+3. Back in the dashboard, open the tunnel → **Public Hostname** → **Add a public
+   hostname**:
+   - Subdomain `shelly`, Domain `domain.com`
+   - Service: **HTTP** → `127.0.0.1:8000`
+   The DNS record is created for you. Add **only** this one hostname — with no
+   catch-all route, the tunnel can reach nothing else on the host.
+
+That's it: no credentials file, no `config.yml`, and the token lives only in the
+root-owned service config on the box.
+
+### Alternative: locally-managed tunnel (config in a file you version-control)
+
+Prefer this only if you want the ingress rules in git rather than the dashboard.
+`cloudflared/config.example.yml` is the template for it.
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create shelly
+cp cloudflared/config.example.yml ~/.cloudflared/config.yml
+$EDITOR ~/.cloudflared/config.yml            # tunnel UUID, username, hostname
+cloudflared tunnel route dns shelly energypilot.domain.com
+sudo cloudflared service install              # runs from the local config
+```
+
+Here the `http_status:404` catch-all at the end of the ingress list is what stops
+the tunnel being pointed at any other service on the host — keep it.
+
+## 4. Cloudflare Access — do not skip this
+
+Zero Trust dashboard → Access → Applications → Add a self-hosted application.
+
+- Domain: `energypilot.domain.com`
+- Policy: **Allow**, include → Emails → your address and any other user's
+
+This puts an identity check in front of Django, so unauthenticated traffic never
+reaches the app at all. Free for up to 50 users. Without it, Django's login page
+is your only gate and it has no brute-force protection.
+
+## 5. Verify
+
+```bash
+# Should report no issues
+DJANGO_DEBUG=false DJANGO_BEHIND_TLS_PROXY=true \
+  ALLOWED_HOSTS=energypilot.domain.com \
+  python manage.py check --deploy
+
+# Should refuse (400) — proves ALLOWED_HOSTS is enforced
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example' http://127.0.0.1:8000/
+
+# Should NOT be reachable from another machine on your LAN
+curl --max-time 5 http://<this-host-lan-ip>:8000/
+```
+
+Check the cookies on a real login: both `sessionid` and `csrftoken` must show
+`Secure` and `HttpOnly`.
+
+---
+
+## What was hardened, and what is still open
+
+Fixed:
+
+- `DEBUG` now defaults to **off** and is env-driven. It was hardcoded `True`,
+  which exposes the secret key and stored device credentials on any error page.
+- **No default admin password.** `create_test_user.py` no longer seeds
+  `admin`/`admin123`; on a fresh DB it generates a random one-time password and
+  prints it once.
+- **Credentials encrypted at rest.** Shelly/Tuya API keys and the ENTSO-E key
+  are stored as Fernet ciphertext (`app/fields.py`); the key lives in
+  `/data/.field_encryption_key`, never in the database. A leaked DB file no
+  longer yields working keys.
+- **Brute-force lockout** via `django-axes` (locks a username+IP after 8 failed
+  logins).
+- **Admin is superuser-only** and hidden from other users; owners manage their
+  own devices through the in-app Settings page instead.
+- **Removed `@csrf_exempt` from the device-control endpoints** and added
+  `@login_required` + ownership checks (they were unauthenticated/forgeable).
+  The frontend sends `X-CSRFToken` on every state-changing request.
+- Session/CSRF cookies `Secure`+`HttpOnly`+`SameSite=Lax`; added
+  `SECURE_PROXY_SSL_HEADER`, `CSRF_TRUSTED_ORIGINS`, HSTS, `SECURE_SSL_REDIRECT`,
+  `X_FRAME_OPTIONS=DENY`, referrer/COOP policies.
+- SSRF guard on user-editable `shelly_server` / `tuya_base_url` (public https
+  hosts only).
+- Session lifetime 90 → 30 days; `ALLOWED_HOSTS` no longer `*`; dependencies
+  pinned and Django/urllib3/etc. updated to patched versions.
+
+**Back up `/data` as a unit — and never separate these two files:**
+`db.sqlite3` and `.field_encryption_key`. The key decrypts the credentials and
+`.django_secret_key` signs sessions; losing the field key makes the stored
+credentials unrecoverable. Keep them together and off any public location.
+
+Still worth doing:
+
+- SQLite with 3 gunicorn workers will contend under load. Not a security issue,
+  but it is why `with_db_retries` exists.
+- Consider key rotation for `.field_encryption_key` (re-encrypt on a new key)
+  if it is ever suspected exposed.

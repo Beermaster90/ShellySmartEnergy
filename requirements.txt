@@ -1,39 +1,50 @@
-amqp
-asgiref
-beautifulsoup4
-billiard
-bs4
-certifi
-charset_normalizer
-click
-click_didyoumean
-click_plugins
-click_repl
-colorama
-cron_descriptor
-django
-django-celery-beat
-django-timezone-field
-entsoe-py
-idna
-kombu
-numpy==1.26.4
+# ShellySmartEnergy dependencies — pinned for reproducible, reviewable builds.
+# An internet-facing box holding cloud API keys should never silently pull a
+# different (possibly compromised) release on rebuild.
+
+# --- Web framework & server ---
+Django==5.2.17            # 5.2 LTS; 5.2.17 fixes the cookie/cache session leak (CVE-2026-35192)
+asgiref==3.11.0
+gunicorn==23.0.0
+whitenoise==6.11.0
+
+# --- Security / auth ---
+django-axes==8.3.1        # login brute-force lockout
+django-ipware==7.0.1      # real client IP behind the Cloudflare tunnel
+
+# --- Scheduling ---
+django-apscheduler==0.7.0
+APScheduler==3.11.2
+tzlocal==5.3.1            # APScheduler dependency
+
+# --- Electricity prices ---
+entsoe-py==0.6.2
+beautifulsoup4==4.14.3    # entsoe-py dependency
+soupsieve==2.8.4          # patched (ReDoS fixes over 2.8.1)
 pandas==2.1.4
-pip
-prompt_toolkit
-python-crontab
-python-dateutil
-pytz
-redis
-requests
-six
-soupsieve
-sqlparse
-typing-extensions
-tzdata
-urllib3
-vine
-wcwidth
-django-apscheduler
-whitenoise
-gunicorn
+numpy==1.26.4
+
+# --- HTTP stack ---
+requests==2.32.5
+urllib3==2.7.0            # patched (decompression-bomb / proxy-redirect fixes over 2.6.2)
+idna==3.11
+certifi==2026.1.4
+charset-normalizer==3.4.4
+
+# --- Shared runtime deps ---
+python-dateutil==2.9.0.post0
+pytz==2025.2
+tzdata==2025.3
+six==1.17.0
+sqlparse==0.6.0           # patched (ReDoS fixes over 0.5.5)
+typing-extensions==4.15.0
+packaging==25.0
+
+# Removed as unused (were pulling in a Celery/Redis stack never wired up):
+#   amqp billiard kombu vine redis celery django-celery-beat django-timezone-field
+#   click click_didyoumean click_plugins click_repl colorama cron_descriptor
+#   python-crontab prompt_toolkit wcwidth bs4 (dummy shim) pip
+
+# --- Cloudflare Access SSO ---
+PyJWT==2.13.0             # verify Access identity tokens
+cryptography==49.0.0      # RS256 signature verification (PyJWT[crypto])

@@ -788,3 +788,252 @@ class EVChargerBlockSchedulingTest(TestCase):
         self.run_assignment()
 
         self.assertEqual(self.assigned_slot_indexes(charger), [4, 5, 6, 7])
+
+
+class CloudflareAccessSSOTest(TestCase):
+    """A verified Access JWT logs the matching user in; bad tokens do not."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        cls._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="eero", password="x", email="eluotio@gmail.com"
+        )
+        self.team = "energypilot-team.cloudflareaccess.com"
+        self.aud = "test-aud-tag"
+
+    def _make_token(self, email="eluotio@gmail.com", aud=None, iss=None, exp_delta=3600):
+        import jwt as pyjwt
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        payload = {
+            "email": email,
+            "aud": aud or self.aud,
+            "iss": iss or f"https://{self.team}",
+            "iat": now,
+            "exp": now + timedelta(seconds=exp_delta),
+        }
+        return pyjwt.encode(payload, self._key, algorithm="RS256")
+
+    def _client_get(self, token=None):
+        # Patch the JWKS lookup to return our local public key (no network).
+        from unittest.mock import patch
+        with self.settings(
+            CF_ACCESS_TEAM_DOMAIN=self.team, CF_ACCESS_AUD=self.aud
+        ), patch("app.cf_access._get_signing_key", return_value=self._key.public_key()):
+            headers = {"HTTP_CF_ACCESS_JWT_ASSERTION": token} if token else {}
+            # Middleware self-disables unless configured; instantiate per-request
+            # via a fresh client so override_settings is picked up.
+            from django.test import Client
+            return Client().get("/shellyapp/", **headers, secure=True)
+
+    def test_valid_token_logs_in_matching_user(self):
+        resp = self._client_get(self._make_token())
+        # Authenticated -> the dashboard renders (200), not a redirect to login.
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.wsgi_request.user.username, "eero")
+
+    def test_no_token_is_not_logged_in(self):
+        resp = self._client_get(None)
+        self.assertFalse(resp.wsgi_request.user.is_authenticated)
+
+    def test_wrong_audience_is_rejected(self):
+        resp = self._client_get(self._make_token(aud="some-other-app"))
+        self.assertFalse(resp.wsgi_request.user.is_authenticated)
+
+    def test_expired_token_is_rejected(self):
+        resp = self._client_get(self._make_token(exp_delta=-120))  # beyond 30s leeway
+        self.assertFalse(resp.wsgi_request.user.is_authenticated)
+
+    def test_unknown_email_is_not_provisioned(self):
+        resp = self._client_get(self._make_token(email="stranger@example.com"))
+        self.assertFalse(resp.wsgi_request.user.is_authenticated)
+        self.assertFalse(User.objects.filter(email="stranger@example.com").exists())
+
+    def test_plain_email_header_alone_does_not_authenticate(self):
+        # Without a signed JWT, the plaintext identity header must be ignored.
+        from unittest.mock import patch
+        with self.settings(CF_ACCESS_TEAM_DOMAIN=self.team, CF_ACCESS_AUD=self.aud), \
+             patch("app.cf_access._get_signing_key", return_value=self._key.public_key()):
+            from django.test import Client
+            resp = Client().get(
+                "/shellyapp/",
+                HTTP_CF_ACCESS_AUTHENTICATED_USER_EMAIL="eluotio@gmail.com",
+                secure=True,
+            )
+        self.assertFalse(resp.wsgi_request.user.is_authenticated)
+
+
+class DeviceSettingsAccessTest(TestCase):
+    """Owners edit their own devices in-app; they cannot touch others' or the admin."""
+
+    def setUp(self):
+        self.eero = User.objects.create_user("eero2", password="Epw!12345")
+        self.kirsti = User.objects.create_user("kirsti2", password="Kpw!12345")
+        self.eero_device = ShellyDevice.objects.create(
+            familiar_name="Eero Heater", shelly_api_key="k", user=self.eero,
+            status=1, run_hours_per_day=3,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+        self.kirsti_device = ShellyDevice.objects.create(
+            familiar_name="Kirsti Heater", shelly_api_key="k", user=self.kirsti,
+            status=1, run_hours_per_day=3,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+
+    def test_owner_can_open_own_device_settings(self):
+        self.client.force_login(self.eero)
+        resp = self.client.get(f"/shellyapp/settings/device/{self.eero_device.device_id}/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_owner_can_save_own_device_settings(self):
+        self.client.force_login(self.eero)
+        resp = self.client.post(
+            f"/shellyapp/settings/device/{self.eero_device.device_id}/",
+            {
+                "familiar_name": "Eero Heater", "status": "1",
+                "run_hours_per_day": "7", "minimum_run_hours_per_day": "0",
+                "block_scheduling": "on", "switch_on_cost": "1.0",
+                "min_run_block_minutes": "30",
+                "day_transfer_price": "1.0", "night_transfer_price": "1.0",
+                "auto_assign_price_threshold": "0", "relay_channel": "0",
+                "shelly_server": "https://shelly-137-eu.shelly.cloud",
+                "shelly_api_key": "k", "shelly_device_name": "x",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.eero_device.refresh_from_db()
+        self.assertEqual(self.eero_device.run_hours_per_day, 7)
+
+    def test_cannot_open_another_users_device(self):
+        self.client.force_login(self.eero)
+        resp = self.client.get(f"/shellyapp/settings/device/{self.kirsti_device.device_id}/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cannot_save_another_users_device(self):
+        self.client.force_login(self.eero)
+        resp = self.client.post(
+            f"/shellyapp/settings/device/{self.kirsti_device.device_id}/",
+            {"familiar_name": "hijacked", "status": "1", "run_hours_per_day": "9",
+             "minimum_run_hours_per_day": "0", "switch_on_cost": "1.0",
+             "min_run_block_minutes": "30", "day_transfer_price": "1.0",
+             "night_transfer_price": "1.0", "auto_assign_price_threshold": "0",
+             "relay_channel": "0", "shelly_api_key": "k"},
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.kirsti_device.refresh_from_db()
+        self.assertEqual(self.kirsti_device.familiar_name, "Kirsti Heater")
+
+    def test_settings_list_only_shows_own_devices(self):
+        self.client.force_login(self.eero)
+        resp = self.client.get("/shellyapp/settings/")
+        self.assertContains(resp, "Eero Heater")
+        self.assertNotContains(resp, "Kirsti Heater")
+
+    def test_settings_requires_login(self):
+        resp = self.client.get("/shellyapp/settings/")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/login/", resp.url)
+
+
+class DeviceSettingsAddTest(TestCase):
+    """Owners can create devices in each category; new objects belong to them."""
+
+    def setUp(self):
+        self.eero = User.objects.create_user("eero3", password="Epw!12345")
+        self.other = User.objects.create_user("other3", password="Opw!12345")
+        self.client.force_login(self.eero)
+
+    def test_add_device_is_owned_by_creator(self):
+        resp = self.client.post("/shellyapp/settings/device/add/", {
+            "familiar_name": "New Heater", "status": "1",
+            "run_hours_per_day": "4", "minimum_run_hours_per_day": "0",
+            "switch_on_cost": "1.0", "min_run_block_minutes": "30",
+            "day_transfer_price": "2.0", "night_transfer_price": "1.0",
+            "auto_assign_price_threshold": "0", "relay_channel": "0",
+            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_api_key": "abc", "shelly_device_name": "n",
+        })
+        self.assertEqual(resp.status_code, 302)
+        d = ShellyDevice.objects.get(familiar_name="New Heater")
+        self.assertEqual(d.user, self.eero)
+
+    def test_add_device_ignores_client_supplied_owner(self):
+        # Even if a user field is POSTed, ownership is forced to the creator.
+        self.client.post("/shellyapp/settings/device/add/", {
+            "familiar_name": "Forced Owner", "status": "1",
+            "run_hours_per_day": "1", "minimum_run_hours_per_day": "0",
+            "switch_on_cost": "1.0", "min_run_block_minutes": "30",
+            "day_transfer_price": "1.0", "night_transfer_price": "1.0",
+            "auto_assign_price_threshold": "0", "relay_channel": "0",
+            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_api_key": "abc", "user": self.other.id,
+        })
+        d = ShellyDevice.objects.get(familiar_name="Forced Owner")
+        self.assertEqual(d.user, self.eero)
+
+    def test_add_thermostat_is_owned_by_creator(self):
+        resp = self.client.post("/shellyapp/settings/thermostat/add/", {
+            "familiar_name": "New Thermostat",
+            "min_temperature_winter": "18", "min_temperature_summer": "15",
+            "max_temperature": "24", "headroom_winter": "0", "headroom_summer": "4",
+            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_api_key": "abc", "shelly_device_name": "t",
+        })
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(ShellyTemperature.objects.get(familiar_name="New Thermostat").user, self.eero)
+
+    def test_add_charger_is_owned_by_creator(self):
+        resp = self.client.post("/shellyapp/settings/charger/add/", {
+            "familiar_name": "New Charger", "status": "1",
+            "charge_current_a": "6", "charge_current_reduced_a": "3",
+            "run_hours_per_day": "5", "switch_on_cost": "1.0",
+            "min_run_block_minutes": "30", "day_transfer_price": "1.0",
+            "night_transfer_price": "1.0", "auto_assign_price_threshold": "0",
+            "tuya_client_id": "", "tuya_client_secret": "", "tuya_device_id": "",
+            "tuya_base_url": "https://openapi.tuyaeu.com",
+        })
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(EVCharger.objects.get(familiar_name="New Charger").user, self.eero)
+
+    def test_add_requires_login(self):
+        self.client.logout()
+        resp = self.client.get("/shellyapp/settings/device/add/")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/login/", resp.url)
+
+
+class FieldEncryptionTest(TestCase):
+    """Credential fields are ciphertext at rest but transparent plaintext in code."""
+
+    def test_shelly_api_key_is_encrypted_in_db_but_plaintext_in_orm(self):
+        from django.db import connection
+        secret = "super-secret-shelly-key-12345"
+        d = ShellyDevice.objects.create(
+            familiar_name="Enc Test", shelly_api_key=secret, user=User.objects.create_user("enc1"),
+            status=1, run_hours_per_day=1,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+        # ORM read returns plaintext (transparent decryption)
+        self.assertEqual(ShellyDevice.objects.get(pk=d.pk).shelly_api_key, secret)
+        # Raw column does NOT contain the plaintext
+        with connection.cursor() as cur:
+            cur.execute("SELECT shelly_api_key FROM app_shellydevice WHERE device_id=%s", [d.pk])
+            raw = cur.fetchone()[0]
+        self.assertNotEqual(raw, secret)
+        self.assertNotIn(secret, raw)
+        self.assertTrue(raw.startswith("gAAAAA"))  # Fernet token prefix
+
+    def test_appsetting_value_encrypted(self):
+        from django.db import connection
+        from app.models import AppSetting
+        AppSetting.objects.create(key="TEST_SECRET", value="my-api-key-value")
+        self.assertEqual(AppSetting.objects.get(key="TEST_SECRET").value, "my-api-key-value")
+        with connection.cursor() as cur:
+            cur.execute("SELECT value FROM app_appsetting WHERE key=%s", ["TEST_SECRET"])
+            raw = cur.fetchone()[0]
+        self.assertNotIn("my-api-key-value", raw)
