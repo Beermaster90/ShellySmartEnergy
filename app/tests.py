@@ -955,7 +955,7 @@ class DeviceSettingsAddTest(TestCase):
             "switch_on_cost": "1.0", "min_run_block_minutes": "30",
             "day_transfer_price": "2.0", "night_transfer_price": "1.0",
             "auto_assign_price_threshold": "0", "relay_channel": "0",
-            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_server": "https://example.com",
             "shelly_api_key": "abc", "shelly_device_name": "n",
         })
         self.assertEqual(resp.status_code, 302)
@@ -970,7 +970,7 @@ class DeviceSettingsAddTest(TestCase):
             "switch_on_cost": "1.0", "min_run_block_minutes": "30",
             "day_transfer_price": "1.0", "night_transfer_price": "1.0",
             "auto_assign_price_threshold": "0", "relay_channel": "0",
-            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_server": "https://example.com",
             "shelly_api_key": "abc", "user": self.other.id,
         })
         d = ShellyDevice.objects.get(familiar_name="Forced Owner")
@@ -981,7 +981,7 @@ class DeviceSettingsAddTest(TestCase):
             "familiar_name": "New Thermostat",
             "min_temperature_winter": "18", "min_temperature_summer": "15",
             "max_temperature": "24", "headroom_winter": "0", "headroom_summer": "4",
-            "shelly_server": "https://shelly-137-eu.shelly.cloud",
+            "shelly_server": "https://example.com",
             "shelly_api_key": "abc", "shelly_device_name": "t",
         })
         self.assertEqual(resp.status_code, 302)
@@ -1037,3 +1037,76 @@ class FieldEncryptionTest(TestCase):
             cur.execute("SELECT value FROM app_appsetting WHERE key=%s", ["TEST_SECRET"])
             raw = cur.fetchone()[0]
         self.assertNotIn("my-api-key-value", raw)
+
+
+class NightPriceFallbackTest(TestCase):
+    """When no price data exists, the device tops up its daily hours at night."""
+
+    def setUp(self):
+        from app.tasks import DeviceController
+        self.DeviceController = DeviceController
+        self.user = User.objects.create_user("fb-user")
+        self.device = ShellyDevice.objects.create(
+            familiar_name="Heater", shelly_api_key="k", user=self.user, status=1,
+            run_hours_per_day=2, minimum_run_hours_per_day=0,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+
+    def at(self, hour, minute=0):
+        # A UTC start_time; user tz defaults to Europe/Helsinki (UTC+2/+3).
+        return datetime(2026, 1, 15, hour, minute, tzinfo=UTC)
+
+    def test_runs_at_night_when_no_price_data(self):
+        # 23:00 UTC = 01:00 Helsinki (night)
+        self.assertTrue(self.DeviceController._apply_night_fallback(self.device, self.at(23, 0)))
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.fallback_periods_today, 1)
+
+    def test_does_not_run_during_day(self):
+        # 10:00 UTC = 12:00 Helsinki (daytime)
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(10, 0)))
+
+    def test_stops_at_daily_target(self):
+        # target = run_hours 2 -> 8 periods. Simulate 8 already done tonight.
+        from datetime import date
+        self.device.fallback_date = date(2026, 1, 15)
+        self.device.fallback_periods_today = 8
+        self.device.save()
+        # 23:00 UTC is still Jan 15 in Helsinki? 23:00 UTC = 01:00 Jan 16 Helsinki.
+        # Use 21:00 UTC = 23:00 Helsinki, still Jan 15, night.
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))
+
+    def test_counter_resets_on_new_day(self):
+        from datetime import date
+        self.device.fallback_date = date(2026, 1, 14)
+        self.device.fallback_periods_today = 8
+        self.device.save()
+        self.assertTrue(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.fallback_periods_today, 1)
+
+    def test_disabled_flag_prevents_fallback(self):
+        self.device.price_fallback_enabled = False
+        self.device.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(23, 0)))
+
+    def test_force_off_prevents_fallback(self):
+        self.device.force_off = True
+        self.device.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(23, 0)))
+
+    def test_zero_target_does_nothing(self):
+        self.device.run_hours_per_day = 0
+        self.device.minimum_run_hours_per_day = 0
+        self.device.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(23, 0)))
+
+    def test_minimum_hours_takes_precedence_as_target(self):
+        self.device.minimum_run_hours_per_day = 1  # 4 periods
+        self.device.fallback_date = None
+        self.device.fallback_periods_today = 0
+        self.device.save()
+        for _ in range(4):
+            self.assertTrue(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))
+        # 5th period exceeds the 1h (4-period) minimum target -> stop
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))

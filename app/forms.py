@@ -40,6 +40,7 @@ class ShellyDeviceSettingsForm(_BootstrapModelForm):
             "status",
             "run_hours_per_day",
             "minimum_run_hours_per_day",
+            "price_fallback_enabled",
             "block_scheduling",
             "switch_on_cost",
             "min_run_block_minutes",

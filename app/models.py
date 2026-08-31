@@ -83,6 +83,19 @@ class ShellyDevice(models.Model):
         help_text="Minimum hours to keep assigned from the cheapest periods (0-24)",
     )
 
+    price_fallback_enabled = models.BooleanField(
+        default=True,
+        verbose_name="Night fallback when prices are unavailable",
+        help_text=(
+            "If no electricity price data is available (e.g. ENTSO-E outage), still "
+            "run the daily target hours during the night, added 15 minutes at a time"
+        ),
+    )
+    # Rolling counter for the night fallback: how many 15-minute periods it has
+    # already run today, so it stops at the daily target. Reset when the date rolls.
+    fallback_date = models.DateField(null=True, blank=True, editable=False)
+    fallback_periods_today = models.IntegerField(default=0, editable=False)
+
     block_scheduling = models.BooleanField(
         default=True,
         verbose_name="Block scheduling",

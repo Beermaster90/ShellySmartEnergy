@@ -210,6 +210,53 @@ class DeviceController:
             log_device_event(None, f"Error fetching thermostat temperatures: {e}", "ERROR")
 
     @staticmethod
+    def _apply_night_fallback(device: ShellyDevice, start_time) -> bool:
+        """Decide whether to run the device this period with no price data available.
+
+        Only during the night (off-peak) window, and only until the day's target
+        of (minimum_run_hours_per_day, else run_hours_per_day) is reached. Tracks
+        progress on the device via a per-day counter, adding 15 minutes at a time.
+        Returns True to run this period.
+
+        Nothing is pre-booked: when real prices return, the normal price-based
+        scheduler simply takes over (this only fires when there is NO price row
+        for the current period), so there are no fallback assignments to clean up.
+        """
+        if not device.price_fallback_enabled or device.force_off:
+            return False
+
+        target_hours = device.minimum_run_hours_per_day or device.run_hours_per_day
+        if target_hours <= 0:
+            return False
+
+        tz = TimeUtils.get_user_timezone(device.user)
+        local = start_time.astimezone(tz)
+        is_daytime = (7 <= local.hour < 22) or (local.hour == 22 and local.minute == 0)
+        if is_daytime:
+            return False
+
+        target_periods = target_hours * 4
+        today = local.date()
+        if device.fallback_date != today:
+            device.fallback_date = today
+            device.fallback_periods_today = 0
+
+        if device.fallback_periods_today >= target_periods:
+            device.save(update_fields=["fallback_date", "fallback_periods_today", "updated_at"])
+            return False
+
+        device.fallback_periods_today += 1
+        device.save(update_fields=["fallback_date", "fallback_periods_today", "updated_at"])
+        log_device_event(
+            device,
+            f"No price data — night fallback running period "
+            f"{device.fallback_periods_today}/{target_periods} "
+            f"({start_time.strftime('%Y-%m-%d %H:%M')} UTC).",
+            "WARN",
+        )
+        return True
+
+    @staticmethod
     def _process_single_device(device: ShellyDevice, active_price_ids: list, start_time) -> None:
         """Process a single device - extracted for use in parallel processing."""
         try:
@@ -218,6 +265,13 @@ class DeviceController:
                 device=device,
                 electricity_price_id__in=active_price_ids,
             ).exclude(assignment_type__in=["removed_overheat", "removed_headroom"]).exists()
+
+            # No price data for this period (e.g. ENTSO-E outage) and nothing
+            # assigned → apply the night fallback so the device still reaches its
+            # daily target. Runs before the thermostat block below, so an
+            # overheating room can still veto it.
+            if not assigned and not active_price_ids:
+                assigned = DeviceController._apply_night_fallback(device, start_time)
 
             # Thermostat temperature overrides
             if device.force_off:
