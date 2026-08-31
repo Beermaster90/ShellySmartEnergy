@@ -120,16 +120,93 @@ sudo cloudflared service install              # runs from the local config
 Here the `http_status:404` catch-all at the end of the ingress list is what stops
 the tunnel being pointed at any other service on the host — keep it.
 
-## 4. Cloudflare Access — do not skip this
+## 4. Cloudflare Access + SSO — do not skip this
 
-Zero Trust dashboard → Access → Applications → Add a self-hosted application.
+Access puts an identity check *in front of* Django, so unauthenticated traffic
+never reaches the app. Once someone passes Access, the app reads the signed
+identity token Cloudflare forwards and logs them straight in (SSO) — no second
+password. Free for up to 50 users.
 
-- Domain: `energypilot.domain.com`
-- Policy: **Allow**, include → Emails → your address and any other user's
+> **Optional.** If you only run locally/LAN (README option A), skip sections 3
+> and 4 entirely — leave `APP_DOMAIN` and `CF_ACCESS_*` unset and use the normal
+> Django login. Everything below is only for the internet-facing setup.
 
-This puts an identity check in front of Django, so unauthenticated traffic never
-reaches the app at all. Free for up to 50 users. Without it, Django's login page
-is your only gate and it has no brute-force protection.
+### 4a. Choose how people prove who they are (identity provider)
+
+Two options:
+
+- **One-time PIN** (simplest, no setup): Cloudflare emails a code to any
+  allow-listed address. Nothing to configure — it's on by default. Good enough
+  for a couple of users.
+- **Google / Gmail** (nicer "Sign in with Google" button): needs a Google OAuth
+  client, created in the Google Cloud Console — details below.
+
+#### Setting up Google sign-in (Google Cloud Console)
+
+1. Go to <https://console.cloud.google.com> → create or pick a project.
+2. **APIs & Services → OAuth consent screen**:
+   - User type **External**, fill app name + your support email.
+   - Scopes: the defaults (`openid`, `email`, `profile`) are enough.
+   - **Test users**: while the consent screen is in "Testing", *only* the Google
+     accounts you add here can sign in. Add each person's Gmail address (yours,
+     Kirsti's). (Or click **Publish app** to allow any Google account — but then
+     your Access policy is the only gate, so keep that allow-list tight.)
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
+   - Application type **Web application**.
+   - **Authorized JavaScript origins**: `https://<your-team>.cloudflareaccess.com`
+   - **Authorized redirect URI**:
+     `https://<your-team>.cloudflareaccess.com/cdn-cgi/access/callback`
+   - Create, then copy the **Client ID** and **Client secret**.
+4. In Cloudflare **Zero Trust → Settings → Authentication → Login methods → Add
+   new → Google**: paste the Client ID and secret, save, and click **Test**.
+   (Use the generic **Google** connector for personal Gmail/Google accounts;
+   **Google Workspace** is a separate connector for a Workspace domain.)
+
+Your team domain (`<your-team>.cloudflareaccess.com`) is shown under **Zero Trust
+→ Settings** and appears in the redirect URL above.
+
+### 4b. Create the Access application
+
+Zero Trust → **Access → Applications → Add an application → Self-hosted**:
+
+- **Application name**: EnergyPilot
+- **Session duration**: e.g. 24h
+- **Public hostname**: `energypilot.domain.com` (the tunnel hostname from §3)
+- **Identity providers**: enable Google and/or One-time PIN
+- Save.
+
+### 4c. Add the policy — who is allowed in
+
+On the application, add a policy: **Action Allow**, **Include → Emails**, and list
+each person's email address. Only those addresses can pass Access. (This is
+separate from the Google "test users" list in 4a — both must include the person
+while Google is in testing mode.)
+
+### 4d. Point the app at this Access application (enables SSO)
+
+The app needs two values so it can cryptographically verify Access tokens:
+
+- **`CF_ACCESS_TEAM_DOMAIN`** — `<your-team>.cloudflareaccess.com`
+  (Zero Trust → Settings).
+- **`CF_ACCESS_AUD`** — the application's **Application Audience (AUD) Tag**
+  (Access → Applications → your app → **Overview**). A 64-character hex string.
+
+Put both in `deploy.env` and redeploy. With them set, the SSO middleware activates
+(it self-disables when they're blank).
+
+### 4e. How Access identities map to app users
+
+The app verifies the token, reads the authenticated **email**, and matches it to
+an existing Django user **by email address**. So each allow-listed Access email
+must equal the `email` field of a Django user:
+
+- Set a user's email in **Django admin → Users** (superuser), matching their
+  Access/Google login address.
+- If a verified email has no matching user, Access lets them to the app but the
+  app does not log them in (it logs a warning) — create/assign a user first.
+- The `admin` superuser has no email by default, so it is reached via the normal
+  password login locally, not via SSO. To administer through SSO instead, set a
+  real user's email and make that user a superuser (Users → tick **Superuser**).
 
 ## 5. Verify
 

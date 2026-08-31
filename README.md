@@ -1,172 +1,171 @@
-# ShellySmartEnergy Docker Usage Guide
-# First-Time Project Setup
+# ShellySmartEnergy
 
-## Prerequisites
-- Docker installed (required for `docker-prod.sh` and `docker-test.sh`).
-- Python 3 (required for local venv setup).
+Automatically runs Shelly smart-plug devices (heaters, water heaters), thermostats
+and an EV charger during the cheapest electricity hours, using ENTSO-E day-ahead
+spot prices at 15-minute resolution. Django app, deployed as a Docker/Podman
+container, optionally published to the internet behind a Cloudflare Tunnel with
+Cloudflare Access single sign-on.
 
-## Quick Install (One Command)
-Run this from any Linux host to install prerequisites and set up the project in the current directory:
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Beermaster90/ShellySmartEnergy/refs/heads/master/Initial_ShellySmartEnergy_Setup.sh)"
+---
+
+## What it does
+
+- Fetches ENTSO-E day-ahead prices (Finland) and, per device, books the cheapest
+  15-minute periods to reach a daily run-hours target.
+- **Block scheduling** — instead of scattering runtime across the day, books a few
+  long continuous runs in the cheapest stretches, trading a fraction of a percent
+  of cost for far fewer on/off cycles (configurable per device).
+- **Night fallback** — if price data is unavailable (e.g. an ENTSO-E outage), still
+  runs the daily target hours at night, added 15 minutes at a time.
+- **Thermostat control** — min-temperature failsafe (force heat when cold),
+  max-temperature cutoff, and a headroom band to stop early when warm enough.
+- **EV charger** (Tuya) — schedules charging on cheap hours, with a reduced-current
+  mode to protect fuses when other high-power devices run.
+- Stored credentials (Shelly / Tuya / ENTSO-E keys) are **encrypted at rest**.
+
+---
+
+## Project structure
+
+```
+app/                     Django app
+  models.py              devices, thermostats, EV charger, prices, assignments, settings
+  price_views.py         ENTSO-E fetch + cheapest-hours / block-scheduling algorithm
+  tasks.py               scheduler jobs: device control, price fetch, night fallback
+  thermostat_manager.py  thermostat-driven assignment logic
+  device_assignment_manager.py, device_override_manager.py
+  views.py               dashboard, in-app device Settings pages, override endpoints
+  forms.py               login + owner-editable device/thermostat/charger settings
+  fields.py              EncryptedCharField / EncryptedTextField (at-rest encryption)
+  cf_access.py           Cloudflare Access JWT verification
+  middleware.py          Cloudflare Access SSO auto-login
+  admin.py               Django admin (superuser-only)
+  services/              Shelly + Tuya API clients
+  management/commands/   backtest_scheduling, backfill_ev_session_energy
+  templates/app/         dashboard, settings, login, graphs
+project/settings.py      env-driven settings (DEBUG, TLS, SSO, security)
+Dockerfile               multi-stage build; entrypoint runs migrations + admin bootstrap
+docker-prod.sh           build & run with Docker (hardened)
+podman-prod.sh           build & run rootless with Podman (hardened)
+deploy-common.sh         shared deploy config, reads deploy.env
+deploy.env.example       template for deploy config (copy to deploy.env)
+cloudflared/             Cloudflare Tunnel config example (locally-managed tunnels)
+DEPLOYMENT.md            full secure deployment: Tunnel, Access, Google SSO, hardening
 ```
 
-## 1. Create a Python Virtual Environment (venv)
+---
+
+## Running the app
+
+There are two ways to run it. **You do not need Cloudflare or SSO** — that's only
+for publishing it to the internet.
+
+### A. Local / LAN, no Cloudflare, normal login (simplest)
+
+Leave `APP_DOMAIN` and the `CF_ACCESS_*` values unset. The app then runs in local
+mode: plain HTTP, the normal Django username/password login, no SSO, no forced
+HTTPS redirect.
+
 ```bash
-python3 -m venv venv
+cp deploy.env.example deploy.env      # leave APP_DOMAIN and CF_ACCESS_* blank
+./docker-prod.sh                      # or ./podman-prod.sh for rootless
 ```
 
-## 2. Activate the Virtual Environment
-- On Linux/macOS:
-	```bash
-	source venv/bin/activate
-	```
-- On Windows:
-	```cmd
-	venv\Scripts\activate
-	```
+- App listens on `127.0.0.1:8000` by default. To reach it from the LAN during
+  local use, set `BIND_ADDRESS=0.0.0.0` in `deploy.env` (only do this on a trusted
+  network — see the note in DEPLOYMENT.md about why loopback is the safe default).
+- On first start a **random admin password is generated and printed once** — the
+  script shows it at the end (and it's in `docker logs django-shelly-prod`). Log in,
+  then change it.
 
-## 3. Install Project Requirements
+### B. Internet-facing, Cloudflare Tunnel + Access SSO (recommended for remote use)
+
+Set `APP_DOMAIN` (and the Cloudflare Access values) in `deploy.env`. The app
+switches into production mode automatically: secure cookies, HSTS, HTTPS-only,
+and — when the `CF_ACCESS_*` values are set — Cloudflare Access SSO so authenticated
+visitors are logged straight in without a second password.
+
+Full step-by-step (tunnel, Access application, Google/Gmail identity provider,
+allow-listing emails, hardening) is in **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+
+---
+
+## Configuration
+
+Configuration lives in three places, by design:
+
+| Where | What | Who edits it |
+|---|---|---|
+| `deploy.env` (host file, gitignored) | Deployment/security/infra: `APP_DOMAIN`, TLS, session length, HSTS, brute-force limits, Cloudflare Access `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | operator, at deploy time |
+| Django admin → **App Settings** (superuser) | `ENTSOE_API_KEY`, `SHELLY_STOP_REST_DEBUG`, `CLEAR_LOGS_ON_STARTUP` | superuser, in the UI |
+| In-app **Settings** page / admin | Per-device settings & credentials (run hours, block scheduling, prices, Shelly/Tuya keys, thermostat, night fallback) | device owner (own devices) or superuser (all) |
+
+Security/TLS/SSO settings are deliberately **not** editable from the web UI — see
+DEPLOYMENT.md for why (a compromised admin session must not be able to weaken
+authentication or transport security). Secrets (`SECRET_KEY`, the field encryption
+key, the tunnel token) live in files/deploy config, never in the database.
+
+### deploy.env keys
+
+See `deploy.env.example` for the full annotated list. Key ones:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `APP_DOMAIN` | *(empty)* | Public hostname. Empty = local mode. Setting it enables production TLS mode. |
+| `BIND_ADDRESS` / `BIND_PORT` | `127.0.0.1` / `8000` | Where the container listens on the host. Keep loopback behind a tunnel. |
+| `DJANGO_SESSION_DAYS` | `30` | "Remember me" session lifetime. |
+| `AXES_FAILURE_LIMIT` | `8` | Failed logins before lockout. |
+| `CF_ACCESS_TEAM_DOMAIN` | *(empty)* | e.g. `your-team.cloudflareaccess.com`. Empty = SSO off. |
+| `CF_ACCESS_AUD` | *(empty)* | Access application Audience (AUD) tag. Empty = SSO off. |
+
+---
+
+## Devices, thermostats, users
+
+- **Add / edit devices** in the in-app **Settings** page (each user manages their
+  own) or in the Django admin (superuser sees all).
+- **Thermostat**: add a Shelly Temperature device, then link it to a Shelly device.
+  Fields: min temperature (winter/summer failsafe — force heat below min−0.5°C),
+  max temperature (stop above max+0.5°C), and headroom (winter/summer — stop this
+  many degrees below max when already warm).
+- **Users**: the Django admin (superuser) manages users, including the
+  **Superuser** / **Staff** checkboxes. Under Cloudflare Access SSO, a verified
+  email is matched to an existing Django user by email address.
+
+---
+
+## Scheduling tools
+
+Backtest the block-scheduling algorithm against stored price history:
 ```bash
-pip install --upgrade pip
-pip install -r requirements.txt
+docker exec -it django-shelly-prod python manage.py backtest_scheduling --days 90
 ```
 
-## 4. Select Python Interpreter in VS Code
-- Open the Command Palette (`Ctrl+Shift+P`)
-- Type and select `Python: Select Interpreter`
-- Choose the interpreter from your `venv` folder (e.g., `venv/bin/python` or `venv\Scripts\python.exe`)
-
-## Overview
-This project uses Docker for both production and test environments. Two shell scripts are provided to build and run the containers:
-- `docker-prod.sh` for production
-## Running the Docker Scripts
-
-### 1. Production
-To build and run the production container:
-```bash
-bash docker-prod.sh
-```
-- The app will run on port 8000.
-- Persistent data is stored in `~/ShellySmartEnergy/data/` in your home directory.
-
-### 2. Test
-To build and run the test container:
-```bash
-bash docker-test.sh
-```
-- The app will run on port 9000.
-- Persistent data is stored in `~/ShellySmartEnergy/data-test/` in your home directory.
-
-## Connecting to the Web UI
-Once the container is running, open the web page in your browser:
-- Local machine: `http://localhost:8000/`
-- LAN access: `http://<lan-ip>:8000/` (use the host machine's IP address on your network)
-
-## First-Time Usage Notes
-- Log in with your user account before anything will work.
-- Add your Shelly devices and set the ENTSO API key in the admin panel.
-- Initial price data appears when the next ENTSO-E day-ahead data is published (around 14:00 Finnish time, which is 12:00 UTC / 13:00 CET depending on DST).
-
-## Thermostat Support
-- Thermostat devices are supported.
-- Configure a Shelly Temperature device in Admin, then select it as the default thermostat from the Shelly Device dropdown.
-- Once configured, thermostat options appear on the device page and are used by the 15-minute automation logic.
-- Thermostat fields:
-  - Min temperature: if the current temperature is below (min - 0.5°C), the next 15-minute period is assigned (device will run).
-  - Max temperature: if the current temperature is above (max + 0.5°C), the next 15-minute period is unassigned (device will stop).
-  - Target temperature: stored for future use, currently not enforced in automation.
+---
 
 ## Versioning
 
-- The Docker image version is read from the `VERSION` file in the project root.
-- Each build appends the current date and time (with seconds) to the version (e.g., `1.0.0-20251002-164123`).
-- All built images are available and selectable by their tag.
+The image tag is `‹VERSION›-‹build-timestamp›`, e.g. `1.0.0-20260830-164123`.
+`VERSION` is a plain file in the repo root; edit it to change the version, then
+rebuild. List images with `docker images django-shelly-prod`.
 
-### Changing the Version
-1. Edit the `VERSION` file and set your desired version (use [semver2](https://semver.org/) format, e.g., `1.2.3`).
-2. Run either script to build a new image with the updated version.
+---
 
-## Listing Available Versions
-To list all available Docker image versions for test or prod:
+## Local development (venv)
+
 ```bash
-docker images django-shelly-test
-docker images django-shelly-prod
+python3 -m venv venv && source venv/bin/activate
+pip install --upgrade pip && pip install -r requirements.txt
+python manage.py migrate
+python manage.py runserver            # local mode, normal login
+python manage.py test app             # run the test suite
 ```
 
-
-## Running a Specific Version
-To run a specific test version (tag):
-```bash
-docker run -d -p 9000:8000 django-shelly-test:1.0.0-20251002-164123
-```
-To run a specific production version (tag):
-```bash
-docker run -d -p 8000:8000 django-shelly-prod:1.0.0-20251002-164123
-```
-Replace the tag with the desired version (including seconds).
-
-
-## Default Django Admin Credentials
-- Username: `admin`
-- Password: `admin12345`
-
-Note: Remember to change password from Admin menu -> Users -> Edit Admin!
-
-## Admin Setup: Add Shelly Devices
-1. Open the admin panel: `http://<host>:8000/admin/`
-2. Log in with your admin user.
-3. Go to `App` -> `Shelly Devices` -> `Add`.
-4. Fill in the device fields:
-   - `Familiar name`: a friendly name you choose.
-   - `Shelly server`: copy this from the Shelly device info page (server/base URL).
-   - `Shelly API key`: copy this from the Shelly device info page (auth/API key).
-   - `Shelly device name`: device name from Shelly (required).
-   - `Relay channel`, `Run hours per day`, and transfer prices as needed.
-5. Save the device.
-
-### Where to find Shelly server and API key
-Open the Shelly app or web UI, select the device, and open its info/details page.
-Copy the `Server` (base URL) and `API key/Auth key` values into the fields above.
-
-## Notes
-- The scripts automatically stop and remove any existing container with the same name before starting a new one.
-- Data is persistent between runs as long as you do not delete the `~/ShellySmartEnergy/data/` or `~/ShellySmartEnergy/data-test/` folders.
-- For production, consider using a real database instead of SQLite for better reliability and scalability.
+---
 
 ## License
-GNU AGPL v3
 
-### Summary (What You Can Do)
-- Use, run, and modify the software.
-- Share the software and your modifications.
-- Use it for commercial or private purposes.
-- You must provide source code and license notices when distributing.
-- If you run a modified version as a network service, you must provide the source to users of that service.
-- Derivative works must remain under AGPL v3.
-
-## Application Settings
-
-On first start, App Settings are created in the database to control application behavior. You can view and edit these in the Django admin panel under "App Settings".
-
-### Global App Settings
-
-| Key                     | Description                                                                 |
-|-------------------------|-----------------------------------------------------------------------------|
-| timezone                | Default timezone for new users and system operations.                        |
-| clear_logs_onstartup    | If set to 1, clears all device logs on each app startup.                     |
-| Shelly_stop_rest_debug  | Enables debug logging for Shelly REST stop operations (1=enabled, 0=disabled)|
-| enstoe_apikey           | API key for Ensto device integration.                                        |
-
-### Default Device Settings
-
-| Key                     | Description                                                                 |
-|-------------------------|-----------------------------------------------------------------------------|
-| shelly_server           | Base URL for Shelly device API communication.                                |
-| automation_enabled      | Global flag to enable or disable device automation (1=enabled, 0=disabled).  |
-| default_run_hours       | Default number of hours devices should run daily.                            |
-| day_transfer_price      | Default transfer price during the day (c/kWh).                               |
-| night_transfer_price    | Default transfer price during the night (c/kWh).                             |
-| relay_channel           | Default relay channel for Shelly devices.                                    |
-
-**Note:** These settings are created automatically if missing, and can be changed at any time in the Django admin panel under "App Settings".
+GNU AGPL v3. You may use, run, modify and share the software, including
+commercially; you must provide source and license notices when distributing, and
+if you run a modified version as a network service you must provide its source to
+users of that service. Derivative works remain under AGPL v3.
