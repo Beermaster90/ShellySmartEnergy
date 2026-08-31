@@ -535,6 +535,7 @@ class EVChargerAdmin(admin.ModelAdmin):
         "id", "familiar_name", "user", "backend",
         "tuya_client_id", "tuya_client_secret", "tuya_device_id", "tuya_base_url",
         "charge_current_a", "charge_current_reduced_a", "run_hours_per_day",
+        "price_fallback_enabled",
         "block_scheduling", "switch_on_cost", "min_run_block_minutes",
         "day_transfer_price", "night_transfer_price", "auto_assign_price_threshold",
         "status",

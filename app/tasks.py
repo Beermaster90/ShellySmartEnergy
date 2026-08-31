@@ -41,7 +41,12 @@ class DeviceController:
         """Calls the Django view to fetch electricity prices internally."""
         try:
             response = call_fetch_prices(None)
-            if isinstance(response, JsonResponse) and response.status_code != 200:
+            # 503 = ENTSO-E maintenance; call_fetch_prices already logged a clear
+            # WARN for it, so don't pile on a second scary ERROR here.
+            if (
+                isinstance(response, JsonResponse)
+                and response.status_code not in (200, 503)
+            ):
                 log_device_event(
                     None,
                     f"Schedule failed to fetch electricity prices. Response: {response.content}",
@@ -210,26 +215,31 @@ class DeviceController:
             log_device_event(None, f"Error fetching thermostat temperatures: {e}", "ERROR")
 
     @staticmethod
-    def _apply_night_fallback(device: ShellyDevice, start_time) -> bool:
-        """Decide whether to run the device this period with no price data available.
+    def _apply_night_fallback(obj, start_time) -> bool:
+        """Decide whether to run this device/charger this period with no price data.
 
-        Only during the night (off-peak) window, and only until the day's target
-        of (minimum_run_hours_per_day, else run_hours_per_day) is reached. Tracks
-        progress on the device via a per-day counter, adding 15 minutes at a time.
-        Returns True to run this period.
+        Works for both ShellyDevice and EVCharger. Only during the night (off-peak)
+        window, and only until the day's target of (minimum_run_hours_per_day, else
+        run_hours_per_day) is reached. Tracks progress via a per-day counter on the
+        object, adding 15 minutes at a time. Returns True to run this period.
 
         Nothing is pre-booked: when real prices return, the normal price-based
-        scheduler simply takes over (this only fires when there is NO price row
-        for the current period), so there are no fallback assignments to clean up.
+        scheduler simply takes over (this only fires when there is NO price row for
+        the current period), so there are no fallback assignments to clean up.
+
+        Callers add any extra preconditions before calling — e.g. the EV path only
+        calls this when a car is actually plugged in, so the nightly quota isn't
+        spent on an empty charger.
         """
-        if not device.price_fallback_enabled or device.force_off:
+        # force_off exists on ShellyDevice only; EVCharger has no such flag.
+        if not getattr(obj, "price_fallback_enabled", False) or getattr(obj, "force_off", False):
             return False
 
-        target_hours = device.minimum_run_hours_per_day or device.run_hours_per_day
+        target_hours = getattr(obj, "minimum_run_hours_per_day", 0) or obj.run_hours_per_day
         if target_hours <= 0:
             return False
 
-        tz = TimeUtils.get_user_timezone(device.user)
+        tz = TimeUtils.get_user_timezone(obj.user)
         local = start_time.astimezone(tz)
         is_daytime = (7 <= local.hour < 22) or (local.hour == 22 and local.minute == 0)
         if is_daytime:
@@ -237,23 +247,26 @@ class DeviceController:
 
         target_periods = target_hours * 4
         today = local.date()
-        if device.fallback_date != today:
-            device.fallback_date = today
-            device.fallback_periods_today = 0
+        if obj.fallback_date != today:
+            obj.fallback_date = today
+            obj.fallback_periods_today = 0
 
-        if device.fallback_periods_today >= target_periods:
-            device.save(update_fields=["fallback_date", "fallback_periods_today", "updated_at"])
+        fields = ["fallback_date", "fallback_periods_today", "updated_at"]
+        if obj.fallback_periods_today >= target_periods:
+            obj.save(update_fields=fields)
             return False
 
-        device.fallback_periods_today += 1
-        device.save(update_fields=["fallback_date", "fallback_periods_today", "updated_at"])
-        log_device_event(
-            device,
+        obj.fallback_periods_today += 1
+        obj.save(update_fields=fields)
+        message = (
             f"No price data — night fallback running period "
-            f"{device.fallback_periods_today}/{target_periods} "
-            f"({start_time.strftime('%Y-%m-%d %H:%M')} UTC).",
-            "WARN",
+            f"{obj.fallback_periods_today}/{target_periods} "
+            f"({start_time.strftime('%Y-%m-%d %H:%M')} UTC)."
         )
+        if isinstance(obj, EVCharger):
+            log_ev_event(obj, message, "WARN")
+        else:
+            log_device_event(obj, message, "WARN")
         return True
 
     @staticmethod
@@ -556,6 +569,17 @@ class DeviceController:
         )
         current_reason = "reduced (other devices running)" if other_devices_running else "normal"
 
+        # States where a car is physically connected and ready to accept a charge command.
+        # Do not attempt start_charging if the car is not plugged in.
+        CAR_CONNECTED_STATES = {"charger_insert", "charger_charging", "charger_pause", "charger_end"}
+        car_connected = status.work_state in CAR_CONNECTED_STATES
+
+        # No price data (e.g. ENTSO-E outage) and a car is plugged in → night
+        # fallback so the charger still reaches its daily target. Guarded on
+        # car_connected so the nightly quota is not spent on an empty charger.
+        if not assigned and not active_price_ids and car_connected:
+            assigned = DeviceController._apply_night_fallback(charger, start_time)
+
         log_ev_event(
             charger,
             f"Period {start_time.strftime('%Y-%m-%d %H:%M')} — "
@@ -564,11 +588,6 @@ class DeviceController:
             f"state={status.work_state}, session={charger.session_energy_kwh} kWh",
             "INFO",
         )
-
-        # States where a car is physically connected and ready to accept a charge command.
-        # Do not attempt start_charging if the car is not plugged in.
-        CAR_CONNECTED_STATES = {"charger_insert", "charger_charging", "charger_pause", "charger_end"}
-        car_connected = status.work_state in CAR_CONNECTED_STATES
 
         # Record charge current on the active assignment so session-end split is weighted correctly
         if status.is_charging:

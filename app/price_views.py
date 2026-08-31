@@ -218,6 +218,31 @@ def call_fetch_prices(request):
         )
         
     except Exception as e:
+        # ENTSO-E scheduled maintenance answers with HTTP 503 and a maintenance
+        # page. That is expected and transient, not a fault in this app — log one
+        # clear WARN and skip the noisy diagnostic dump below.
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", None)
+        body = ""
+        try:
+            body = (getattr(response, "text", "") or "")[:500]
+        except Exception:
+            body = ""
+        is_maintenance = status_code == 503 or "temporarily unavailable" in body.lower() \
+            or "maintenance" in body.lower()
+        if is_maintenance:
+            log_device_event(
+                None,
+                "ENTSO-E Transparency Platform is under maintenance (HTTP 503). "
+                "No new prices this cycle — the scheduler will retry each hour and "
+                "resume automatically when it returns.",
+                "WARN",
+            )
+            return JsonResponse(
+                {"error": "ENTSO-E under maintenance", "status": "maintenance", "retry": True},
+                status=503,
+            )
+
         try:
             raw_client = EntsoeRawClient(api_key=api_key)
             raw_response = raw_client.query_day_ahead_prices(

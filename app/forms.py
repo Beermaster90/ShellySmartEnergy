@@ -95,6 +95,7 @@ class EVChargerSettingsForm(_BootstrapModelForm):
             "charge_current_a",
             "charge_current_reduced_a",
             "run_hours_per_day",
+            "price_fallback_enabled",
             "block_scheduling",
             "switch_on_cost",
             "min_run_block_minutes",

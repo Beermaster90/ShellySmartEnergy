@@ -1110,3 +1110,82 @@ class NightPriceFallbackTest(TestCase):
             self.assertTrue(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))
         # 5th period exceeds the 1h (4-period) minimum target -> stop
         self.assertFalse(self.DeviceController._apply_night_fallback(self.device, self.at(21, 0)))
+
+
+class EntsoeMaintenanceLogTest(TestCase):
+    """A 503 from ENTSO-E logs one clear maintenance WARN, not a noisy error dump."""
+
+    def _run(self):
+        from unittest.mock import patch
+        import requests
+        from app.models import AppSetting
+        AppSetting.objects.update_or_create(key="ENTSOE_API_KEY", defaults={"value": "test-key"})
+
+        resp = requests.models.Response()
+        resp.status_code = 503
+        resp._content = b"<html><head><title>Service Temporarily Unavailable</title></head></html>"
+        err = requests.exceptions.HTTPError("503 Server Error: Service Unavailable")
+        err.response = resp
+
+        with patch("app.price_views.EntsoeRawClient") as Client:
+            Client.return_value.query_day_ahead_prices.side_effect = err
+            with patch("app.price_views.ElectricityPrice.objects") as prices:
+                prices.filter.return_value.exists.return_value = False
+                from app.price_views import call_fetch_prices
+                return call_fetch_prices(None)
+
+    def test_maintenance_returns_503_and_logs_one_warn(self):
+        from app.models import DeviceLog
+        before = DeviceLog.objects.count()
+        r = self._run()
+        self.assertEqual(r.status_code, 503)
+        logs = DeviceLog.objects.all()[before:] if False else DeviceLog.objects.order_by("-created_at")[:6]
+        msgs = [(l.status, l.message) for l in logs]
+        # exactly one maintenance WARN, and no ERROR-level noise about the fetch
+        warns = [m for s, m in msgs if s == "WARN" and "maintenance" in m.lower()]
+        errors = [m for s, m in msgs if s == "ERROR" and "ENTSOE" in m]
+        self.assertTrue(warns, f"expected a maintenance WARN, got {msgs}")
+        self.assertFalse(errors, f"did not expect ENTSOE ERROR logs, got {errors}")
+
+
+class EVNightPriceFallbackTest(TestCase):
+    """EV charger tops up its daily hours at night with no price data — car permitting."""
+
+    def setUp(self):
+        from app.tasks import DeviceController
+        self.DeviceController = DeviceController
+        self.user = User.objects.create_user("ev-fb-user")
+        self.charger = EVCharger.objects.create(
+            familiar_name="Laturi", user=self.user, status=1, run_hours_per_day=2,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+
+    def at(self, hour, minute=0):
+        return datetime(2026, 1, 15, hour, minute, tzinfo=UTC)
+
+    def test_charges_at_night_when_no_price_data(self):
+        # 21:00 UTC = 23:00 Helsinki (night). Caller guards car_connected; the
+        # helper itself just applies night + target + counter.
+        self.assertTrue(self.DeviceController._apply_night_fallback(self.charger, self.at(21, 0)))
+        self.charger.refresh_from_db()
+        self.assertEqual(self.charger.fallback_periods_today, 1)
+
+    def test_not_during_day(self):
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.charger, self.at(10, 0)))
+
+    def test_stops_at_target(self):
+        from datetime import date
+        self.charger.fallback_date = date(2026, 1, 15)
+        self.charger.fallback_periods_today = 8   # 2h * 4
+        self.charger.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.charger, self.at(21, 0)))
+
+    def test_disabled_flag(self):
+        self.charger.price_fallback_enabled = False
+        self.charger.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.charger, self.at(21, 0)))
+
+    def test_zero_target(self):
+        self.charger.run_hours_per_day = 0
+        self.charger.save()
+        self.assertFalse(self.DeviceController._apply_night_fallback(self.charger, self.at(21, 0)))

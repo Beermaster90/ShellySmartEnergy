@@ -317,6 +317,17 @@ class EVCharger(models.Model):
     run_hours_per_day = models.IntegerField(
         default=0, help_text="Hours to charge per day (0 = no automatic scheduling)"
     )
+    price_fallback_enabled = models.BooleanField(
+        default=True,
+        verbose_name="Night fallback when prices are unavailable",
+        help_text=(
+            "If no electricity price data is available (e.g. ENTSO-E outage), still "
+            "charge the daily target hours during the night (only while a car is "
+            "plugged in), added 15 minutes at a time"
+        ),
+    )
+    fallback_date = models.DateField(null=True, blank=True, editable=False)
+    fallback_periods_today = models.IntegerField(default=0, editable=False)
     block_scheduling = models.BooleanField(
         default=True,
         verbose_name="Block scheduling",
