@@ -208,6 +208,21 @@ must equal the `email` field of a Django user:
   password login locally, not via SSO. To administer through SSO instead, set a
   real user's email and make that user a superuser (Users → tick **Superuser**).
 
+## 4f. Rotating the tunnel token
+
+The tunnel token is a bearer credential — if it ever leaks (pasted into a chat,
+a log, shell history), the fix is to **rotate it**, not to scrub copies. Rotating
+invalidates the old token everywhere at once.
+
+1. Cloudflare **Zero Trust → Networks → Tunnels → your tunnel → Configure →
+   Refresh token** (this kills the old token).
+2. On the host, run `./rotate-tunnel-token.sh`. It prompts for the new token with
+   **hidden input** (so it never enters your shell history) and restarts the
+   connector. It stores the token 0600 at `data/.cloudflared_token` (gitignored)
+   and passes it via `TUNNEL_TOKEN` so it stays out of the container's arg list.
+
+After rotation, any leaked copy of the old token is worthless.
+
 ## 5. Verify
 
 ```bash

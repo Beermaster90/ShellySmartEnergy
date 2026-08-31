@@ -33,6 +33,8 @@ deploy.env
 .field_encryption_key*
 cloudflared/*.json
 cloudflared/config.yml
+*.cloudflared_token
+.cloudflared_token*
 
 # VS Code
 .vscode/
