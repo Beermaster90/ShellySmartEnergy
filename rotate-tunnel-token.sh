@@ -19,7 +19,7 @@ IMAGE="${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}"
 echo "=== Cloudflare Tunnel token rotation ==="
 echo
 echo "STEP 1 — refresh the token in Cloudflare FIRST (this kills the old one):"
-echo "  Zero Trust -> Networks -> Tunnels -> your tunnel -> Configure -> Refresh token"
+echo "  Networking -> Tunnels -> your tunnel -> Configure -> Refresh token (right side)"
 echo "  Then copy the NEW token (the long 'eyJ...' string) from the install command."
 echo
 read -rp "Have you refreshed the token in Cloudflare? [y/N] " ack
