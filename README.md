@@ -12,6 +12,10 @@ Cloudflare Access single sign-on.
 
 - Fetches ENTSO-E day-ahead prices (Finland) and, per device, books the cheapest
   15-minute periods to reach a daily run-hours target.
+- **Price source fallback** — if ENTSO-E fails (e.g. its own maintenance), falls
+  back to [Elering](https://dashboard.elering.ee/en/nps/price) (Estonia's TSO,
+  republishes Nord Pool prices for Finland on separate infrastructure, no API
+  key needed) before giving up for that cycle.
 - **Block scheduling** — instead of scattering runtime across the day, books a few
   long continuous runs in the cheapest stretches, trading a fraction of a percent
   of cost for far fewer on/off cycles (configurable per device).
@@ -30,7 +34,7 @@ Cloudflare Access single sign-on.
 ```
 app/                     Django app
   models.py              devices, thermostats, EV charger, prices, assignments, settings
-  price_views.py         ENTSO-E fetch + cheapest-hours / block-scheduling algorithm
+  price_views.py         ENTSO-E fetch (+ Elering fallback) + cheapest-hours / block-scheduling algorithm
   tasks.py               scheduler jobs: device control, price fetch, night fallback
   thermostat_manager.py  thermostat-driven assignment logic
   device_assignment_manager.py, device_override_manager.py

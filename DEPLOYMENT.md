@@ -34,6 +34,12 @@ cookies, HSTS, HTTPS redirect, and the right `ALLOWED_HOSTS` and
 
 `deploy.env` is gitignored. Never commit it.
 
+Both run scripts **refuse to start** if `deploy.env` is missing or empty —
+rather than silently falling back to `ALLOWED_HOSTS=localhost,127.0.0.1`,
+which looks fine until the public domain starts getting a 400 on every
+request. If you deliberately want a local-only run, `deploy.env` still has to
+exist; just leave `APP_DOMAIN` empty in it.
+
 The run scripts **refuse to start** if `APP_DOMAIN` is set together with
 `DJANGO_DEBUG=true`.
 

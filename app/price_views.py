@@ -12,6 +12,7 @@ from .models import (
     EVChargerAssignment,
 )
 import pandas as pd
+import requests
 from entsoe import EntsoeRawClient
 from entsoe.parsers import parse_prices
 from django.shortcuts import render
@@ -26,6 +27,33 @@ import pytz  # pip install pytz
 import xml.etree.ElementTree as ET
 
 LOCAL_TZ = pytz.timezone("Europe/Helsinki")  # change if needed
+
+# Fallback day-ahead price source, used only when ENTSO-E is unavailable.
+# Elering (Estonia's TSO) republishes Nord Pool prices on its own
+# infrastructure, no API key required, so it stays reachable during an
+# ENTSO-E outage. Finland-only, matching this app's hardcoded area_code.
+ELERING_PRICE_URL = "https://dashboard.elering.ee/api/nps/price"
+ELERING_AREA = "fi"
+
+
+def _fetch_elering_prices(start_utc, end_utc):
+    """Day-ahead prices for Finland from Elering, in EUR/MWh, UTC-indexed.
+
+    Raises on any failure (network, bad response, no data) so callers can
+    treat it the same way as an ENTSO-E failure.
+    """
+    params = {
+        "start": start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end": end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    response = requests.get(ELERING_PRICE_URL, params=params, timeout=15)
+    response.raise_for_status()
+    points = response.json().get("data", {}).get(ELERING_AREA, [])
+    if not points:
+        raise ValueError("Elering returned no Finnish price data")
+    index = pd.to_datetime([p["timestamp"] for p in points], unit="s", utc=True)
+    values = [p["price"] for p in points]
+    return pd.Series(values, index=index).sort_index()
 
 
 def get_entsoe_api_key():
@@ -219,8 +247,9 @@ def call_fetch_prices(request):
         
     except Exception as e:
         # ENTSO-E scheduled maintenance answers with HTTP 503 and a maintenance
-        # page. That is expected and transient, not a fault in this app — log one
-        # clear WARN and skip the noisy diagnostic dump below.
+        # page. That is expected and transient, not a fault in this app. Either
+        # way, try the Elering fallback (separate infrastructure, no API key)
+        # before giving up.
         response = getattr(e, "response", None)
         status_code = getattr(response, "status_code", None)
         body = ""
@@ -230,81 +259,103 @@ def call_fetch_prices(request):
             body = ""
         is_maintenance = status_code == 503 or "temporarily unavailable" in body.lower() \
             or "maintenance" in body.lower()
-        if is_maintenance:
+
+        fallback_series = None
+        try:
+            fallback_start_utc = TimeUtils.to_utc(start_local)
+            fallback_end_utc = TimeUtils.to_utc(end_local)
+            fallback_series = _fetch_elering_prices(fallback_start_utc, fallback_end_utc)
+            fallback_series = fallback_series.loc[
+                (fallback_series.index >= fallback_start_utc) & (fallback_series.index < fallback_end_utc)
+            ]
+            fallback_series = fallback_series.resample('15min').ffill()
+        except Exception:
+            fallback_series = None
+
+        if fallback_series is not None and not fallback_series.empty:
+            price_series = fallback_series
             log_device_event(
                 None,
-                "ENTSO-E Transparency Platform is under maintenance (HTTP 503). "
-                "No new prices this cycle — the scheduler will retry each hour and "
-                "resume automatically when it returns.",
+                "ENTSO-E unavailable"
+                + (" (under maintenance, HTTP 503)" if is_maintenance else "")
+                + " — used Elering as a fallback price source for Finland.",
+                "WARN",
+            )
+        elif is_maintenance:
+            log_device_event(
+                None,
+                "ENTSO-E Transparency Platform is under maintenance (HTTP 503) and the "
+                "Elering fallback failed too. No new prices this cycle — the scheduler "
+                "will retry each hour and resume automatically when either returns.",
                 "WARN",
             )
             return JsonResponse(
                 {"error": "ENTSO-E under maintenance", "status": "maintenance", "retry": True},
                 status=503,
             )
-
-        try:
-            raw_client = EntsoeRawClient(api_key=api_key)
-            raw_response = raw_client.query_day_ahead_prices(
-                country_code=area_code, start=start, end=end
-            )
-            raw_text = SecurityUtils.sanitize_message(str(raw_response))
-            preview = raw_text[:500]
-            log_device_event(
-                None,
-                f"ENTSOE raw response preview: length={len(raw_text)} preview={preview}",
-                "DEBUG",
-            )
-            xml_summary = _summarize_entsoe_xml(raw_text)
-            log_device_event(
-                None,
-                f"ENTSOE raw response summary: {xml_summary}",
-                "DEBUG",
-            )
+        else:
             try:
-                parsed = parse_prices(raw_text)
-                parsed_summary = {
-                    key: {
-                        "count": len(series),
-                        "start": series.index.min().isoformat() if len(series) else None,
-                        "end": series.index.max().isoformat() if len(series) else None,
-                    }
-                    for key, series in parsed.items()
-                }
+                raw_client = EntsoeRawClient(api_key=api_key)
+                raw_response = raw_client.query_day_ahead_prices(
+                    country_code=area_code, start=start, end=end
+                )
+                raw_text = SecurityUtils.sanitize_message(str(raw_response))
+                preview = raw_text[:500]
                 log_device_event(
                     None,
-                    f"ENTSOE parsed price summary: {parsed_summary}",
+                    f"ENTSOE raw response preview: length={len(raw_text)} preview={preview}",
                     "DEBUG",
                 )
-            except Exception as parse_error:
-                parse_error_safe = SecurityUtils.get_safe_error_message(
-                    parse_error, "ENTSOE parse_prices failed"
+                xml_summary = _summarize_entsoe_xml(raw_text)
+                log_device_event(
+                    None,
+                    f"ENTSOE raw response summary: {xml_summary}",
+                    "DEBUG",
                 )
-                log_device_event(None, parse_error_safe, "ERROR")
-        except Exception as raw_error:
-            raw_error_safe = SecurityUtils.get_safe_error_message(
-                raw_error, "ENTSOE raw response fetch failed"
+                try:
+                    parsed = parse_prices(raw_text)
+                    parsed_summary = {
+                        key: {
+                            "count": len(series),
+                            "start": series.index.min().isoformat() if len(series) else None,
+                            "end": series.index.max().isoformat() if len(series) else None,
+                        }
+                        for key, series in parsed.items()
+                    }
+                    log_device_event(
+                        None,
+                        f"ENTSOE parsed price summary: {parsed_summary}",
+                        "DEBUG",
+                    )
+                except Exception as parse_error:
+                    parse_error_safe = SecurityUtils.get_safe_error_message(
+                        parse_error, "ENTSOE parse_prices failed"
+                    )
+                    log_device_event(None, parse_error_safe, "ERROR")
+            except Exception as raw_error:
+                raw_error_safe = SecurityUtils.get_safe_error_message(
+                    raw_error, "ENTSOE raw response fetch failed"
+                )
+                log_device_event(None, raw_error_safe, "ERROR")
+            # Sanitize error to hide API key and other sensitive information
+            safe_error = SecurityUtils.get_safe_error_message(
+                e, "ENTSOE price fetch failed"
             )
-            log_device_event(None, raw_error_safe, "ERROR")
-        # Sanitize error to hide API key and other sensitive information
-        safe_error = SecurityUtils.get_safe_error_message(
-            e, "ENTSOE price fetch failed"
-        )
-        safe_error = SecurityUtils.sanitize_message(safe_error)
-        error_type = type(e).__name__
-        if safe_error.endswith(":"):
-            safe_error = f"{safe_error} {error_type}"
-        else:
-            safe_error = f"{safe_error} (type={error_type})"
-        log_device_event(
-            None,
-            f"ENTSOE request failed for area={area_code}, start={start}, end={end}",
-            "ERROR",
-        )
-        log_device_event(None, safe_error, "ERROR")
-        return JsonResponse(
-            {"error": "Failed to fetch electricity prices from ENTSOE"}, status=500
-        )
+            safe_error = SecurityUtils.sanitize_message(safe_error)
+            error_type = type(e).__name__
+            if safe_error.endswith(":"):
+                safe_error = f"{safe_error} {error_type}"
+            else:
+                safe_error = f"{safe_error} (type={error_type})"
+            log_device_event(
+                None,
+                f"ENTSOE request failed for area={area_code}, start={start}, end={end}",
+                "ERROR",
+            )
+            log_device_event(None, safe_error, "ERROR")
+            return JsonResponse(
+                {"error": "Failed to fetch electricity prices from ENTSOE"}, status=500
+            )
 
     # **Ensure price_series is not empty before proceeding**
     if price_series.empty:
@@ -380,36 +431,20 @@ def set_cheapest_hours():
             )
             return
 
-        devices = ShellyDevice.objects.select_related("thermostat_device").all()
+        devices = ShellyDevice.objects.all()
         print("Found", len(devices), "devices.")
 
         for device in devices:
             print(f"Processing device: {device.device_id} ({device.familiar_name})")
 
-            # Thermostat takes priority: skip all assignments if temperature is above max or in headroom zone
-            if device.thermostat_device:
-                thermostat = device.thermostat_device
-                if thermostat.temperature_updated_at and (current_time - thermostat.temperature_updated_at) <= timedelta(minutes=15):
-                    max_trigger = thermostat.max_temperature + Decimal("0.5")
-                    effective_headroom = thermostat.get_effective_headroom()
-                    headroom_trigger = thermostat.max_temperature - effective_headroom
-
-                    if thermostat.current_temperature > max_trigger:
-                        log_device_event(
-                            device,
-                            f"Skipping assignments: thermostat {thermostat.familiar_name} above max "
-                            f"({thermostat.current_temperature} > {max_trigger}).",
-                            "INFO",
-                        )
-                        continue
-                    elif effective_headroom > 0 and thermostat.current_temperature > headroom_trigger:
-                        log_device_event(
-                            device,
-                            f"Skipping assignments: thermostat {thermostat.familiar_name} in headroom zone "
-                            f"({thermostat.current_temperature} > {headroom_trigger}, headroom={effective_headroom}°C).",
-                            "INFO",
-                        )
-                        continue
+            # Note: current temperature is deliberately NOT considered here. This
+            # plans the device's cheap hours for the whole day (including hours
+            # long after "now", e.g. overnight once a currently-warm room has
+            # cooled). ThermostatAssignmentManager.apply_next_period_assignments
+            # runs every 15 minutes and adds/removes the *next* period's
+            # assignment against the live reading (forced_min / removed_overheat /
+            # removed_headroom) — that's where temperature actually gates
+            # assignments, one period at a time.
 
             # Get cheapest hours for this device (tagged with assignment type)
             plan = plan_run_slots(

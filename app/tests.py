@@ -559,6 +559,52 @@ class ThermostatAssignmentManagerTest(TestCase):
         self.assertEqual(assignment.assignment_type, "removed_overheat")
 
 
+class SetCheapestHoursIgnoresCurrentTemperatureTest(TestCase):
+    """set_cheapest_hours plans the whole day regardless of the current reading.
+
+    A room reading above max right now doesn't mean it'll still be above max
+    overnight — the day's cheap-hour plan should still be created. Per-period
+    overheat/underheat handling is ThermostatAssignmentManager's job, run every
+    15 minutes against the live reading (see ThermostatAssignmentManagerTest).
+    """
+
+    def test_creates_assignments_for_device_above_max_right_now(self):
+        user = User.objects.create_user(username="cheapest-hours-user")
+        now = TimeUtils.now_utc()
+        thermostat = ShellyTemperature.objects.create(
+            familiar_name="HotRoom",
+            shelly_api_key="thermostat-key",
+            user=user,
+            min_temperature_winter=Decimal("18.0"),
+            min_temperature_summer=Decimal("15.0"),
+            max_temperature=Decimal("20.0"),
+            current_temperature=Decimal("30.0"),  # well above max right now
+            temperature_updated_at=now,
+        )
+        device = ShellyDevice.objects.create(
+            familiar_name="Floors",
+            shelly_api_key="device-key",
+            shelly_device_name="device-id",
+            user=user,
+            status=1,
+            run_hours_per_day=2,
+            day_transfer_price=Decimal("0.0"),
+            night_transfer_price=Decimal("0.0"),
+            thermostat_device=thermostat,
+        )
+        for i in range(4):
+            start = now + timedelta(hours=1, minutes=15 * i)
+            ElectricityPrice.objects.create(
+                start_time=start,
+                end_time=start + timedelta(minutes=15),
+                price_kwh=Decimal("1.0"),
+            )
+
+        set_cheapest_hours()
+
+        self.assertTrue(DeviceAssignment.objects.filter(device=device).exists())
+
+
 class BlockSchedulingTest(SimpleTestCase):
     """Block scheduling trades a little money for far fewer switch-ons."""
 
@@ -1113,7 +1159,12 @@ class NightPriceFallbackTest(TestCase):
 
 
 class EntsoeMaintenanceLogTest(TestCase):
-    """A 503 from ENTSO-E logs one clear maintenance WARN, not a noisy error dump."""
+    """A 503 from ENTSO-E logs one clear maintenance WARN, not a noisy error dump.
+
+    Elering (the fallback source) is mocked to fail too here, so this covers
+    the "both sources down" case. See EntsoeEleringFallbackTest for the case
+    where Elering picks up the slack.
+    """
 
     def _run(self):
         from unittest.mock import patch
@@ -1129,10 +1180,11 @@ class EntsoeMaintenanceLogTest(TestCase):
 
         with patch("app.price_views.EntsoeRawClient") as Client:
             Client.return_value.query_day_ahead_prices.side_effect = err
-            with patch("app.price_views.ElectricityPrice.objects") as prices:
-                prices.filter.return_value.exists.return_value = False
-                from app.price_views import call_fetch_prices
-                return call_fetch_prices(None)
+            with patch("app.price_views._fetch_elering_prices", side_effect=Exception("elering also down")):
+                with patch("app.price_views.ElectricityPrice.objects") as prices:
+                    prices.filter.return_value.exists.return_value = False
+                    from app.price_views import call_fetch_prices
+                    return call_fetch_prices(None)
 
     def test_maintenance_returns_503_and_logs_one_warn(self):
         from app.models import DeviceLog
@@ -1146,6 +1198,99 @@ class EntsoeMaintenanceLogTest(TestCase):
         errors = [m for s, m in msgs if s == "ERROR" and "ENTSOE" in m]
         self.assertTrue(warns, f"expected a maintenance WARN, got {msgs}")
         self.assertFalse(errors, f"did not expect ENTSOE ERROR logs, got {errors}")
+
+
+class EntsoeEleringFallbackTest(TestCase):
+    """When ENTSO-E fails, Elering (no API key needed) fills in and the fetch succeeds."""
+
+    def _run(self):
+        from unittest.mock import patch
+        import requests
+        import pandas as pd
+        from app.models import AppSetting
+        from app.utils.time_utils import TimeUtils
+        AppSetting.objects.update_or_create(key="ENTSOE_API_KEY", defaults={"value": "test-key"})
+
+        resp = requests.models.Response()
+        resp.status_code = 503
+        resp._content = b"<html><head><title>Service Temporarily Unavailable</title></head></html>"
+        err = requests.exceptions.HTTPError("503 Server Error: Service Unavailable")
+        err.response = resp
+
+        # Points spanning well before/after "now", so whatever start/end
+        # window call_fetch_prices computes falls inside this range.
+        now_utc = TimeUtils.now_utc()
+        index = pd.date_range(now_utc - pd.Timedelta(days=2), periods=4 * 24 * 5, freq="15min", tz="UTC")
+        elering_series = pd.Series([50.0] * len(index), index=index)
+
+        with patch("app.price_views.EntsoeRawClient") as Client:
+            Client.return_value.query_day_ahead_prices.side_effect = err
+            with patch("app.price_views._fetch_elering_prices", return_value=elering_series):
+                with patch("app.price_views.set_cheapest_hours"):
+                    with patch("app.tasks.DeviceController.control_shelly_devices"):
+                        from app.price_views import call_fetch_prices
+                        return call_fetch_prices(None)
+
+    def test_fallback_success_returns_200_and_logs_warn_not_error(self):
+        from app.models import DeviceLog
+        r = self._run()
+        self.assertEqual(r.status_code, 200)
+        logs = DeviceLog.objects.order_by("-created_at")[:8]
+        msgs = [(l.status, l.message) for l in logs]
+        fallback_warns = [m for s, m in msgs if s == "WARN" and "elering" in m.lower()]
+        errors = [m for s, m in msgs if s == "ERROR" and "ENTSOE" in m]
+        self.assertTrue(fallback_warns, f"expected an Elering fallback WARN, got {msgs}")
+        self.assertFalse(errors, f"did not expect ENTSOE ERROR logs, got {errors}")
+
+    def test_fallback_saves_prices(self):
+        from app.models import ElectricityPrice
+        r = self._run()
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(ElectricityPrice.objects.exists())
+
+
+class FetchEleringPricesTest(TestCase):
+    """Unit coverage for the Elering response parser, independent of ENTSO-E."""
+
+    def test_parses_finnish_prices_into_utc_series(self):
+        from unittest.mock import patch, MagicMock
+        from app.price_views import _fetch_elering_prices
+        from app.utils.time_utils import TimeUtils
+
+        payload = {
+            "success": True,
+            "data": {
+                "fi": [
+                    {"timestamp": 1735689600, "price": 45.0},
+                    {"timestamp": 1735690500, "price": 47.5},
+                ],
+                "ee": [{"timestamp": 1735689600, "price": 99.0}],
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.json.return_value = payload
+        mock_response.raise_for_status.return_value = None
+
+        with patch("app.price_views.requests.get", return_value=mock_response) as get:
+            series = _fetch_elering_prices(TimeUtils.now_utc(), TimeUtils.now_utc())
+
+        self.assertEqual(len(series), 2)
+        self.assertEqual(list(series.values), [45.0, 47.5])
+        self.assertTrue(str(series.index.tz) in ("UTC", "utc"))
+        self.assertEqual(get.call_args.kwargs["params"]["start"][-1], "Z")
+
+    def test_raises_when_no_finnish_data(self):
+        from unittest.mock import patch, MagicMock
+        from app.price_views import _fetch_elering_prices
+        from app.utils.time_utils import TimeUtils
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"success": True, "data": {"ee": []}}
+        mock_response.raise_for_status.return_value = None
+
+        with patch("app.price_views.requests.get", return_value=mock_response):
+            with self.assertRaises(ValueError):
+                _fetch_elering_prices(TimeUtils.now_utc(), TimeUtils.now_utc())
 
 
 class EVNightPriceFallbackTest(TestCase):

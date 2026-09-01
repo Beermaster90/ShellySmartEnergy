@@ -25,6 +25,7 @@ media/
 local_settings.py
 
 # Local secrets & backups — NEVER commit (contain DB dumps, API keys, signing key)
+*.secret
 backups/
 deploy.env
 *.django_secret_key

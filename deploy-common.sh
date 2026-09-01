@@ -5,16 +5,28 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/deploy.env}"
 
-if [ -f "$ENV_FILE" ]; then
-  echo "Loading deployment config from $ENV_FILE"
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-else
-  echo "No $ENV_FILE found — using local defaults."
-  echo "Copy deploy.env.example to deploy.env before exposing this publicly."
+# Require deploy.env to exist (even just to explicitly leave APP_DOMAIN empty
+# for a local run) rather than silently falling back to defaults. A missing
+# file previously meant ALLOWED_HOSTS silently reverted to localhost-only,
+# which looks fine right up until it 400s every request on the real domain.
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: $ENV_FILE not found — refusing to deploy." >&2
+  echo "Create it first:" >&2
+  echo "  cp deploy.env.example deploy.env" >&2
+  echo "  \$EDITOR deploy.env   # set APP_DOMAIN, or leave it empty for local-only" >&2
+  exit 1
 fi
+if [ ! -s "$ENV_FILE" ]; then
+  echo "ERROR: $ENV_FILE exists but is empty — refusing to deploy." >&2
+  echo "Fill it in (see deploy.env.example) before deploying." >&2
+  exit 1
+fi
+
+echo "Loading deployment config from $ENV_FILE"
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
 
 APP_DOMAIN="${APP_DOMAIN:-}"
 BIND_ADDRESS="${BIND_ADDRESS:-127.0.0.1}"
