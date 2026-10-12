@@ -24,6 +24,7 @@ docker run -d \
   --user "$(id -u):$(id -g)" \
   -v "$DATA_TEST_DIR":/data \
   django-shelly-test:$TAG
-docker image prune -f
+# Only this project's untagged leftovers, never other images on the host.
+docker image prune -f --filter "label=org.opencontainers.image.title=shellysmartenergy"
 echo "\nDatabase file location: $DATA_TEST_DIR/db.sqlite3"
 echo "Django test server is running at: http://127.0.0.1:9000"

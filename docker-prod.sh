@@ -14,8 +14,6 @@ if [ ! -d "$DATA_DIR" ]; then
 fi
 sudo chown "$(id -u)":"$(id -g)" "$DATA_DIR"
 
-docker image prune -f
-
 echo "Database file location: $DATA_DIR/db.sqlite3"
 echo "Listening on:   $BIND_ADDRESS:$BIND_PORT"
 echo "Reachable at:   $PUBLIC_URL"

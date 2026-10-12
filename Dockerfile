@@ -1,5 +1,8 @@
 # Multi-stage build for smaller final image
 FROM python:3.11-slim AS builder
+# Project label: lets the deploy scripts prune only this project's leftover
+# images, never other images on the host.
+LABEL org.opencontainers.image.title="shellysmartenergy"
 
 # Install build dependencies
 RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
@@ -25,6 +28,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Final stage - runtime image
 FROM python:3.11-slim
+# Project label: lets the deploy scripts prune only this project's leftover
+# images, never other images on the host.
+LABEL org.opencontainers.image.title="shellysmartenergy"
 
 # Build arguments for version info
 ARG VERSION=1.0.0

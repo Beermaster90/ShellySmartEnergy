@@ -98,11 +98,17 @@ HARDENING_ARGS=(
 )
 
 # Keep disk usage bounded: a full disk took this host down once mid-deploy.
-# Keeps the newest $KEEP_IMAGES app images (for quick rollback) and drops older
-# ones, dangling layers and the build cache. Never touches other images
-# (e.g. cloudflared). Run after the new container is up, so the image in use is
-# always among the newest. Usage: prune_old_images docker|podman
+# Run after the new container is up, so the image in use is always among the
+# newest. Only touches this project's images — other images on the host are
+# never removed. Usage: prune_old_images docker|podman
+#   1. keeps the newest $KEEP_IMAGES django-shelly-prod images (for rollback),
+#      removes older ones;
+#   2. removes untagged leftovers carrying this project's image label;
+#   3. only if PRUNE_BUILD_CACHE=true (deploy.env): clears Docker's build
+#      cache. That cache is HOST-WIDE — Docker can't tell which project a
+#      cache entry belongs to — so it is opt-in.
 KEEP_IMAGES=5
+PROJECT_LABEL="org.opencontainers.image.title=shellysmartenergy"
 prune_old_images() {
   local engine="$1"
   # CreatedAt ("2026-10-12 18:49:53 +0300 ...") sorts correctly as text.
@@ -111,10 +117,9 @@ prune_old_images() {
     | while read -r image; do
         "$engine" rmi "$image" >/dev/null 2>&1 && echo "Removed old image $image"
       done
-  "$engine" image prune -f >/dev/null 2>&1 || true
-  if [ "$engine" = docker ]; then
+  "$engine" image prune -f --filter "label=$PROJECT_LABEL" >/dev/null 2>&1 || true
+  if [ "${PRUNE_BUILD_CACHE:-false}" = "true" ] && [ "$engine" = docker ]; then
+    echo "PRUNE_BUILD_CACHE=true: clearing Docker build cache (host-wide)"
     docker builder prune -af >/dev/null 2>&1 || true
   fi
-  # Podman has no separate build cache: its intermediate layers are the
-  # dangling images removed above.
 }

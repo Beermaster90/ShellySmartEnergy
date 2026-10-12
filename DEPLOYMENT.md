@@ -64,10 +64,16 @@ compromise. Rootless Podman has no daemon, and container root maps to an
 unprivileged host UID.
 
 After the new container is up, both scripts prune old images so repeated
-deploys can't fill the disk: the newest 5 `django-shelly-prod` images are kept
-(for rollback), older ones, dangling layers and Docker's build cache are removed.
-Other images (e.g. cloudflared) are untouched. Change `KEEP_IMAGES` in
-`deploy-common.sh` to keep more or fewer. Migrations run automatically on
+deploys can't fill the disk. Only this project's images are touched: the newest
+5 `django-shelly-prod` images are kept (for rollback), older ones are removed,
+as are untagged leftovers carrying the project's image label
+(`org.opencontainers.image.title=shellysmartenergy`). Other images on the host
+(e.g. cloudflared, other projects) are never removed. Change `KEEP_IMAGES` in
+`deploy-common.sh` to keep more or fewer.
+
+Docker's build cache is shared by every project on the host and can't be
+filtered per project, so clearing it is opt-in: set `PRUNE_BUILD_CACHE=true` in
+`deploy.env` only on a host dedicated to this app. Migrations run automatically on
 container start, so take a copy of `data/db.sqlite3` first when a release
 changes the schema.
 
