@@ -96,3 +96,25 @@ HARDENING_ARGS=(
   --read-only
   --tmpfs /tmp:rw,noexec,nosuid,size=64m
 )
+
+# Keep disk usage bounded: a full disk took this host down once mid-deploy.
+# Keeps the newest $KEEP_IMAGES app images (for quick rollback) and drops older
+# ones, dangling layers and the build cache. Never touches other images
+# (e.g. cloudflared). Run after the new container is up, so the image in use is
+# always among the newest. Usage: prune_old_images docker|podman
+KEEP_IMAGES=5
+prune_old_images() {
+  local engine="$1"
+  # CreatedAt ("2026-10-12 18:49:53 +0300 ...") sorts correctly as text.
+  "$engine" images django-shelly-prod --format '{{.CreatedAt}}|{{.Repository}}:{{.Tag}}' \
+    | sort -r | tail -n +$((KEEP_IMAGES + 1)) | cut -d'|' -f2 \
+    | while read -r image; do
+        "$engine" rmi "$image" >/dev/null 2>&1 && echo "Removed old image $image"
+      done
+  "$engine" image prune -f >/dev/null 2>&1 || true
+  if [ "$engine" = docker ]; then
+    docker builder prune -af >/dev/null 2>&1 || true
+  fi
+  # Podman has no separate build cache: its intermediate layers are the
+  # dangling images removed above.
+}

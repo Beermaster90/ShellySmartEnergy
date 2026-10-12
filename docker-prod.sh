@@ -77,3 +77,5 @@ else
   echo "Admin account already existed — password unchanged."
   echo "To reset it: docker exec -it $CONTAINER_NAME python manage.py changepassword admin"
 fi
+
+prune_old_images docker

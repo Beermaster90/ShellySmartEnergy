@@ -76,7 +76,7 @@ podman run -d \
 echo
 echo "Running rootless as UID $(id -u). Verify with:"
 echo "  podman inspect $CONTAINER_NAME --format '{{.HostConfig.SecurityOpt}} {{.HostConfig.CapDrop}}'"
-podman image prune -f >/dev/null 2>&1 || true
+prune_old_images podman
 
 # Surface the initial admin credentials (printed once on a fresh database).
 echo "Waiting for the container to initialise..."

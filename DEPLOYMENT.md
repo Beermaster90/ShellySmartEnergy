@@ -63,6 +63,14 @@ the Docker daemon runs as root, so a daemon-level compromise is a host-level
 compromise. Rootless Podman has no daemon, and container root maps to an
 unprivileged host UID.
 
+After the new container is up, both scripts prune old images so repeated
+deploys can't fill the disk: the newest 5 `django-shelly-prod` images are kept
+(for rollback), older ones, dangling layers and Docker's build cache are removed.
+Other images (e.g. cloudflared) are untouched. Change `KEEP_IMAGES` in
+`deploy-common.sh` to keep more or fewer. Migrations run automatically on
+container start, so take a copy of `data/db.sqlite3` first when a release
+changes the schema.
+
 Both scripts apply:
 
 | flag | effect |
