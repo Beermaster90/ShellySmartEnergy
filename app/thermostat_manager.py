@@ -44,6 +44,10 @@ class ThermostatAssignmentManager:
         )
 
         for device in devices:
+            # A timed override keeps the device on regardless of temperature, so
+            # don't add/remove thermostat assignments while it covers next period.
+            if device.scheduled_override_active(next_start):
+                continue
             thermostat = device.thermostat_device
             if not thermostat or not thermostat.temperature_updated_at:
                 continue

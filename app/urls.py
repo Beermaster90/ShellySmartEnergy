@@ -47,11 +47,6 @@ urlpatterns = [
         name="set_scheduled_device_override",
     ),
     path(
-        "toggle-force-device-on/",
-        views.toggle_force_device_on,
-        name="toggle_force_device_on",
-    ),
-    path(
         "toggle-force-device-off/",
         views.toggle_force_device_off,
         name="toggle_force_device_off",

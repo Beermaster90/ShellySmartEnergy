@@ -23,6 +23,14 @@ Cloudflare Access single sign-on.
   runs the daily target hours at night, added 15 minutes at a time.
 - **Thermostat control** — min-temperature failsafe (force heat when cold),
   max-temperature cutoff, and a headroom band to stop early when warm enough.
+- **Device overrides** (dashboard, Shelly devices):
+  - *Turn On For Selected Time* (12 h / 1 / 2 / 5 days) — switches the device on
+    immediately and keeps it on for the whole window, booking every 15-minute
+    period. It deliberately **ignores price, run hours and all thermostat rules,
+    including the max-temperature cutoff** — use it only when you want the device
+    running regardless. The same button cancels it early; it also ends when you
+    use Force Device Off or disable automation.
+  - *Force Device Off* — keeps the device off until released.
 - **EV charger** (Tuya) — schedules charging on cheap hours, with a reduced-current
   mode to protect fuses when other high-power devices run.
 - Stored credentials (Shelly / Tuya / ENTSO-E keys) are **encrypted at rest**.

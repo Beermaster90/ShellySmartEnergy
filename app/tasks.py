@@ -270,6 +270,22 @@ class DeviceController:
         return True
 
     @staticmethod
+    def apply_current_period(device: ShellyDevice) -> None:
+        """Bring the relay in line with the current period now, without waiting
+        for the next 15-minute scheduler pass (used after a user override).
+        Same rules as the scheduler, so thermostat limits still apply."""
+        now_utc = TimeUtils.now_utc()
+        start_time = now_utc.replace(
+            minute=(now_utc.minute // 15) * 15, second=0, microsecond=0
+        )
+        active_price_ids = list(
+            ElectricityPrice.objects.filter(
+                start_time__range=(start_time, start_time + timedelta(minutes=14, seconds=59))
+            ).values_list("id", flat=True)
+        )
+        DeviceController._process_single_device(device, active_price_ids, start_time)
+
+    @staticmethod
     def _process_single_device(device: ShellyDevice, active_price_ids: list, start_time) -> None:
         """Process a single device - extracted for use in parallel processing."""
         try:
@@ -286,8 +302,19 @@ class DeviceController:
             if not assigned and not active_price_ids:
                 assigned = DeviceController._apply_night_fallback(device, start_time)
 
+            if device.scheduled_override_active():
+                # Timed override: the user asked for the device to be ON for the
+                # whole window. Deliberately bypasses price, run hours and all
+                # thermostat limits (max/headroom) — the user's explicit choice.
+                assigned = True
+                log_device_event(
+                    device,
+                    f"Timed override active until {device.scheduled_override_until.isoformat()} — "
+                    f"ON for period {start_time.strftime('%Y-%m-%d %H:%M')} UTC (thermostat ignored).",
+                    "INFO",
+                )
             # Thermostat temperature overrides
-            if device.force_off:
+            elif device.force_off:
                 assigned = False
                 log_device_event(
                     device,

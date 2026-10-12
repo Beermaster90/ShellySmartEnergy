@@ -314,43 +314,101 @@ class DeviceOverrideManagerTest(TestCase):
             for index in range(count)
         ]
 
-    def test_scheduled_override_adds_normal_daily_run_hours(self):
+    def test_scheduled_override_books_every_period_in_window(self):
         prices = self.create_prices(12)
+        beyond = ElectricityPrice.objects.create(
+            start_time=self.now + timedelta(hours=12, minutes=14),
+            end_time=self.now + timedelta(hours=12, minutes=29),
+            price_kwh=Decimal("0.1"),
+        )
         with patch.object(TimeUtils, "now_utc", return_value=self.now):
             until = DeviceOverrideManager.start_scheduled_override(self.device, 12)
 
-        assignments = DeviceAssignment.objects.filter(
-            device=self.device,
-            assignment_type="scheduled_override",
-        ).order_by("electricity_price__price_kwh")
-        self.assertEqual(assignments.count(), 4)
-        self.assertEqual(
-            list(assignments.values_list("electricity_price_id", flat=True)),
-            [price.id for price in reversed(prices[-4:])],
-        )
-        self.device.refresh_from_db()
-        self.assertEqual(self.device.scheduled_override_until, until)
-        self.assertFalse(self.device.force_on)
-        self.assertFalse(self.device.force_off)
-
-    def test_force_on_keeps_exactly_one_upcoming_period_queued(self):
-        prices = self.create_prices(4)
-        with patch.object(TimeUtils, "now_utc", return_value=self.now):
-            DeviceOverrideManager.set_force_on(self.device, True)
-
-        forced_ids = list(
+        booked = set(
             DeviceAssignment.objects.filter(
-                device=self.device, assignment_type="force_on"
+                device=self.device, assignment_type="scheduled_override"
             ).values_list("electricity_price_id", flat=True)
         )
-        self.assertEqual(forced_ids, [prices[0].id, prices[1].id])
+        # All periods, including the one already in progress, not only the cheapest.
+        self.assertEqual(booked, {price.id for price in prices})
+        self.assertNotIn(beyond.id, booked)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.scheduled_override_until, until)
+        self.assertFalse(self.device.force_off)
 
-        next_now = self.now + timedelta(minutes=15)
-        DeviceOverrideManager.queue_force_on_periods(self.device, now_utc=next_now)
-        self.assertEqual(
-            set(DeviceAssignment.objects.filter(device=self.device).values_list("electricity_price_id", flat=True)),
-            {prices[0].id, prices[1].id, prices[2].id},
+    def test_scheduled_override_keeps_existing_and_reactivates_removed(self):
+        prices = self.create_prices(3)
+        DeviceAssignment.objects.create(
+            user=self.user, device=self.device,
+            electricity_price=prices[0], assignment_type="cheapest",
         )
+        DeviceAssignment.objects.create(
+            user=self.user, device=self.device,
+            electricity_price=prices[1], assignment_type="removed_headroom",
+        )
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 12)
+
+        types = dict(
+            DeviceAssignment.objects.filter(device=self.device).values_list(
+                "electricity_price_id", "assignment_type"
+            )
+        )
+        self.assertEqual(types, {
+            prices[0].id: "cheapest",
+            prices[1].id: "scheduled_override",
+            prices[2].id: "scheduled_override",
+        })
+
+    def test_override_bypasses_thermostat_max_temperature(self):
+        from app.tasks import DeviceController
+
+        thermostat = ShellyTemperature.objects.create(
+            familiar_name="Hot room", shelly_api_key="k", shelly_device_name="t",
+            user=self.user, max_temperature=Decimal("20"),
+            current_temperature=Decimal("25"),
+            temperature_updated_at=self.now,
+        )
+        self.device.thermostat_device = thermostat
+        self.device.save(update_fields=["thermostat_device"])
+        price = self.create_prices(1)[0]
+        status = {"data": {"device_status": {"switch:0": {"output": False}}}}
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 12)
+            with (
+                patch("app.tasks.ShellyService") as service_class,
+                patch.object(DeviceController, "toggle_shelly_device_with_state") as toggle,
+            ):
+                service_class.return_value.get_device_status.return_value = status
+                DeviceController._process_single_device(
+                    self.device, [price.id], price.start_time
+                )
+        toggle.assert_called_once_with(self.device, "on", False)
+
+    def test_cancel_override_removes_bookings_and_clears_until(self):
+        self.create_prices(4)
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 12)
+            DeviceOverrideManager.cancel_scheduled_override(self.device)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.scheduled_override_until)
+        self.assertFalse(DeviceAssignment.objects.filter(device=self.device).exists())
+
+    def test_apply_current_period_turns_override_device_on_now(self):
+        from app.tasks import DeviceController
+
+        self.create_prices(2)
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 12)
+            status = {"data": {"device_status": {"switch:0": {"output": False}}}}
+            with (
+                patch("app.tasks.ShellyService") as service_class,
+                patch.object(DeviceController, "toggle_shelly_device_with_state") as toggle,
+            ):
+                service_class.return_value.get_device_status.return_value = status
+                DeviceController.apply_current_period(self.device)
+
+        toggle.assert_called_once_with(self.device, "on", False)
 
     def test_shorter_scheduled_override_removes_old_assignments_past_horizon(self):
         late_price = ElectricityPrice.objects.create(
@@ -383,15 +441,15 @@ class DeviceOverrideManagerTest(TestCase):
                 electricity_price=price,
                 assignment_type="cheapest",
             )
-        self.device.force_on = True
-        self.device.save(update_fields=["force_on"])
+        self.device.scheduled_override_until = self.now + timedelta(hours=12)
+        self.device.save(update_fields=["scheduled_override_until"])
 
         with patch.object(TimeUtils, "now_utc", return_value=self.now):
             DeviceOverrideManager.set_force_off(self.device, True)
 
         self.device.refresh_from_db()
         self.assertTrue(self.device.force_off)
-        self.assertFalse(self.device.force_on)
+        self.assertIsNone(self.device.scheduled_override_until)
         self.assertEqual(
             set(DeviceAssignment.objects.filter(device=self.device).values_list(
                 "electricity_price_id", flat=True
@@ -431,23 +489,26 @@ class DeviceOverrideManagerTest(TestCase):
 
         toggle.assert_called_once_with(self.device, "off", True)
 
-    def test_force_on_endpoint_cannot_change_another_users_device(self):
+    def test_override_endpoint_cannot_change_another_users_device(self):
         other = User.objects.create_user(username="other-user", password="test-pass")
         self.client.force_login(other)
         response = self.client.post(
-            "/shellyapp/toggle-force-device-on/",
-            data=json.dumps({"device_id": self.device.device_id, "enabled": True}),
+            "/shellyapp/set-scheduled-device-override/",
+            data=json.dumps({"device_id": self.device.device_id, "duration_hours": 12}),
             content_type="application/json",
         )
 
         self.assertEqual(response.status_code, 404)
         self.device.refresh_from_db()
-        self.assertFalse(self.device.force_on)
+        self.assertIsNone(self.device.scheduled_override_until)
 
     def test_scheduled_override_endpoint_returns_assigned_price_ids(self):
         prices = self.create_prices(8)
         self.client.force_login(self.user)
-        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+        with (
+            patch.object(TimeUtils, "now_utc", return_value=self.now),
+            patch("app.tasks.DeviceController.apply_current_period") as apply_now,
+        ):
             response = self.client.post(
                 "/shellyapp/set-scheduled-device-override/",
                 data=json.dumps({
@@ -469,6 +530,7 @@ class DeviceOverrideManagerTest(TestCase):
             ),
         )
         self.assertTrue(set(payload["assigned_price_ids"]).issubset({p.id for p in prices}))
+        apply_now.assert_called_once()
 
 
 class ThermostatAssignmentManagerTest(TestCase):

@@ -94,7 +94,6 @@ class ShellyDeviceAdmin(admin.ModelAdmin):
         "user",
         "status",
         "scheduled_override_until",
-        "force_on",
         "force_off",
         "last_contact",
         "relay_channel",

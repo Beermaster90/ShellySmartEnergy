@@ -62,16 +62,17 @@ class ShellyDevice(models.Model):
     scheduled_override_until = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Keep creating normal price-based assignments until this UTC time",
-    )
-    force_on = models.BooleanField(
-        default=False,
-        help_text="Continuously queue the next period so the device remains on",
+        help_text="Timed override: keep the device ON until this UTC time, ignoring price and thermostat rules",
     )
     force_off = models.BooleanField(
         default=False,
         help_text="Keep the device off while preserving its normal assignments",
     )
+
+    def scheduled_override_active(self, at=None) -> bool:
+        """True while a timed override holds the device on (at ``at``, default now)."""
+        at = at or TimeUtils.now_utc()
+        return bool(self.scheduled_override_until and self.scheduled_override_until > at)
 
     # New field for how many hours the device should run daily
     run_hours_per_day = models.IntegerField(
@@ -482,7 +483,6 @@ class DeviceAssignment(models.Model):
         ("threshold", "Price Threshold"),
         ("forced_min", "Forced — Min Temperature"),
         ("scheduled_override", "Scheduled Override"),
-        ("force_on", "Force Device On"),
         ("manual", "Manual"),
         ("removed_overheat", "Removed — Overheating"),
         ("removed_headroom", "Removed — Headroom"),
