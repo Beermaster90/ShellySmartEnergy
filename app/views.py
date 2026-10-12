@@ -168,6 +168,19 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
             if assignment.assignment_type in ("forced_min", "scheduled_override"):
                 forced_devices_map.setdefault(price_id, []).append(device_key)
 
+    # A timed override runs the device for its whole window, but periods that
+    # were already "cheapest" keep that type (so cancelling restores them), so
+    # mark the window as forced from scheduled_override_until itself.
+    for device in devices:
+        if not device.scheduled_override_active(now_utc):
+            continue
+        device_key = str(device.device_id)
+        for price in prices:
+            if price["end_time"] > now_utc and price["start_time"] < device.scheduled_override_until:
+                forced = forced_devices_map.setdefault(price["id"], [])
+                if device_key not in forced:
+                    forced.append(device_key)
+
     for ev_assignment in ev_assignments:
         price_id = ev_assignment.electricity_price.id
         charger_key = f"ev_{ev_assignment.charger.id}"

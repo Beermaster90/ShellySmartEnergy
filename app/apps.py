@@ -37,6 +37,10 @@ class AppConfig(AppConfig):
             if not AppSetting.objects.filter(key="CLEAR_LOGS_ON_STARTUP").exists():
                 AppSetting.objects.create(key="CLEAR_LOGS_ON_STARTUP", value="1")
 
+            # Days of device logs kept by the hourly cleanup job (tasks.prune_old_logs)
+            if not AppSetting.objects.filter(key="LOG_RETENTION_DAYS").exists():
+                AppSetting.objects.create(key="LOG_RETENTION_DAYS", value="14")
+
             # Clear all existing logs at startup (configurable)
             try:
                 clear_logs_setting = AppSetting.objects.filter(

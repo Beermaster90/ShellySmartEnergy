@@ -137,6 +137,15 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # Hourly log retention cleanup, off the busy :00/:05/:15 marks.
+    scheduler.add_job(
+        DeviceController.prune_old_logs,
+        trigger=CronTrigger(minute="10"),
+        id="prune_old_logs",
+        max_instances=1,
+        replace_existing=True,
+    )
+
     logger.info("APScheduler started successfully.")
     scheduler.start()
     _scheduler = scheduler

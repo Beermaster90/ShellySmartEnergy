@@ -384,7 +384,9 @@
                 </div>
                 <div class="device-override-controls">
                     <select id="scheduledOverrideDuration" aria-label="Override duration">
-                        <option value="12">12 hours</option>
+                        <option value="1">1 hour</option>
+                        <option value="5">5 hours</option>
+                        <option value="12" selected>12 hours</option>
                         <option value="24">1 day</option>
                         <option value="48">2 days</option>
                         <option value="120">5 days</option>
@@ -684,6 +686,14 @@
                         // assignment, without waiting for another page request.
                         const assignedCell = row.querySelector('.assigned');
                         if (assignedCell) assignedCell.textContent = 'X';
+                        let forcedList = (row.getAttribute('data-forced') || '')
+                            .split(',').map(id => id.trim()).filter(id => id.length > 0);
+                        if (!forcedList.includes(option.value)) {
+                            forcedList.push(option.value);
+                            row.setAttribute('data-forced', forcedList.join(','));
+                        }
+                        const forcedCell = row.querySelector('.forced');
+                        if (forcedCell) forcedCell.textContent = 'X';
                     });
                     showNotification(result.data.message, 'success');
                     updateOverrideControls(option, false);

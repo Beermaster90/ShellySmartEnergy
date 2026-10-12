@@ -12,6 +12,7 @@ from app.models import (
     TemperatureReading,
     ElectricityPrice,
     DeviceLog,
+    AppSetting,
     DeviceAssignment,
     EVCharger,
     EVChargerAssignment,
@@ -268,6 +269,31 @@ class DeviceController:
         else:
             log_device_event(obj, message, "WARN")
         return True
+
+    DEFAULT_LOG_RETENTION_DAYS = 14
+
+    @staticmethod
+    def prune_old_logs() -> None:
+        """Hourly: delete device logs older than LOG_RETENTION_DAYS (AppSetting).
+
+        Keeps the log table bounded between restarts; the controller writes
+        several rows per device every 15 minutes. Also trims APScheduler's
+        job-run history, which grows the same way.
+        """
+        setting = AppSetting.objects.filter(key="LOG_RETENTION_DAYS").first()
+        try:
+            days = max(1, int(setting.value)) if setting else DeviceController.DEFAULT_LOG_RETENTION_DAYS
+        except (TypeError, ValueError):
+            days = DeviceController.DEFAULT_LOG_RETENTION_DAYS
+        cutoff = TimeUtils.now_utc() - timedelta(days=days)
+        deleted, _ = DeviceLog.objects.filter(created_at__lt=cutoff).delete()
+        if deleted:
+            log_device_event(
+                None, f"Log cleanup: removed {deleted} log rows older than {days} days.", "INFO"
+            )
+
+        from django_apscheduler.models import DjangoJobExecution
+        DjangoJobExecution.objects.delete_old_job_executions(max_age=days * 86400)
 
     @staticmethod
     def apply_current_period(device: ShellyDevice) -> None:

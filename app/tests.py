@@ -184,7 +184,7 @@ class SchedulerStartupTest(SimpleTestCase):
 
             scheduler.start_scheduler()
 
-        self.assertEqual(fake_scheduler.add_job.call_count, 4)
+        self.assertEqual(fake_scheduler.add_job.call_count, 5)
         self.assertEqual(
             [call.kwargs["id"] for call in fake_scheduler.add_job.call_args_list],
             [
@@ -192,6 +192,7 @@ class SchedulerStartupTest(SimpleTestCase):
                 "control_shelly",
                 "control_ev_chargers",
                 "thermostat_assignments",
+                "prune_old_logs",
             ],
         )
         fake_scheduler.start.assert_called_once()
@@ -393,6 +394,42 @@ class DeviceOverrideManagerTest(TestCase):
         self.device.refresh_from_db()
         self.assertIsNone(self.device.scheduled_override_until)
         self.assertFalse(DeviceAssignment.objects.filter(device=self.device).exists())
+
+    def test_one_hour_override_books_only_that_hour(self):
+        prices = self.create_prices(8)
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 1)
+        booked = set(
+            DeviceAssignment.objects.filter(device=self.device).values_list(
+                "electricity_price_id", flat=True
+            )
+        )
+        # now = 10:01, override until 11:01 → periods 10:00–11:00 (5 slots).
+        self.assertEqual(booked, {price.id for price in prices[:5]})
+
+    def test_unsupported_override_duration_is_rejected(self):
+        with self.assertRaises(ValueError):
+            DeviceOverrideManager.start_scheduled_override(self.device, 3)
+
+    def test_dashboard_marks_whole_override_window_forced(self):
+        from django.test import RequestFactory
+        from app.views import get_common_context
+
+        prices = self.create_prices(4)
+        DeviceAssignment.objects.create(
+            user=self.user, device=self.device,
+            electricity_price=prices[1], assignment_type="cheapest",
+        )
+        with patch.object(TimeUtils, "now_utc", return_value=self.now):
+            DeviceOverrideManager.start_scheduled_override(self.device, 1)
+            request = RequestFactory().get("/")
+            request.user = self.user
+            context = get_common_context(request)
+
+        key = str(self.device.device_id)
+        forced = {p["id"] for p in context["prices"] if key in p["forced_devices"].split(",")}
+        # The "cheapest" period inside the window is shown as forced too.
+        self.assertEqual(forced, {price.id for price in prices})
 
     def test_apply_current_period_turns_override_device_on_now(self):
         from app.tasks import DeviceController
@@ -1396,3 +1433,36 @@ class EVNightPriceFallbackTest(TestCase):
         self.charger.run_hours_per_day = 0
         self.charger.save()
         self.assertFalse(self.DeviceController._apply_night_fallback(self.charger, self.at(21, 0)))
+
+
+class LogRetentionTest(TestCase):
+    def test_prune_old_logs_keeps_recent_and_respects_setting(self):
+        from app.models import AppSetting, DeviceLog
+        from app.tasks import DeviceController
+
+        now = datetime(2026, 1, 20, 12, 0, tzinfo=UTC)
+        AppSetting.objects.update_or_create(key="LOG_RETENTION_DAYS", defaults={"value": "7"})
+        old = DeviceLog.objects.create(message="old")
+        recent = DeviceLog.objects.create(message="recent")
+        DeviceLog.objects.filter(id=old.id).update(created_at=now - timedelta(days=8))
+        DeviceLog.objects.filter(id=recent.id).update(created_at=now - timedelta(days=6))
+
+        with patch.object(TimeUtils, "now_utc", return_value=now):
+            DeviceController.prune_old_logs()
+
+        self.assertFalse(DeviceLog.objects.filter(id=old.id).exists())
+        self.assertTrue(DeviceLog.objects.filter(id=recent.id).exists())
+
+    def test_invalid_retention_setting_falls_back_to_default(self):
+        from app.models import AppSetting, DeviceLog
+        from app.tasks import DeviceController
+
+        now = datetime(2026, 1, 20, 12, 0, tzinfo=UTC)
+        AppSetting.objects.update_or_create(key="LOG_RETENTION_DAYS", defaults={"value": "abc"})
+        log = DeviceLog.objects.create(message="ten days")
+        DeviceLog.objects.filter(id=log.id).update(created_at=now - timedelta(days=10))
+
+        with patch.object(TimeUtils, "now_utc", return_value=now):
+            DeviceController.prune_old_logs()
+
+        self.assertTrue(DeviceLog.objects.filter(id=log.id).exists())

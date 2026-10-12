@@ -15,7 +15,7 @@ class DeviceOverrideManager:
     - Force Off: the device stays off until released.
     """
 
-    VALID_DURATIONS_HOURS = {12, 24, 48, 120}
+    VALID_DURATIONS_HOURS = {1, 5, 12, 24, 48, 120}
     REMOVED_TYPES = {"removed_overheat", "removed_headroom"}
 
     @staticmethod
@@ -30,7 +30,7 @@ class DeviceOverrideManager:
     @transaction.atomic
     def start_scheduled_override(cls, device: ShellyDevice, duration_hours: int):
         if duration_hours not in cls.VALID_DURATIONS_HOURS:
-            raise ValueError("Duration must be 12, 24, 48, or 120 hours")
+            raise ValueError("Duration must be 1, 5, 12, 24, 48, or 120 hours")
 
         now_utc = TimeUtils.now_utc()
         override_until = now_utc + timedelta(hours=duration_hours)

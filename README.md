@@ -24,7 +24,7 @@ Cloudflare Access single sign-on.
 - **Thermostat control** — min-temperature failsafe (force heat when cold),
   max-temperature cutoff, and a headroom band to stop early when warm enough.
 - **Device overrides** (dashboard, Shelly devices):
-  - *Turn On For Selected Time* (12 h / 1 / 2 / 5 days) — switches the device on
+  - *Turn On For Selected Time* (1 h / 5 h / 12 h / 1 / 2 / 5 days) — switches the device on
     immediately and keeps it on for the whole window, booking every 15-minute
     period. It deliberately **ignores price, run hours and all thermostat rules,
     including the max-temperature cutoff** — use it only when you want the device
@@ -109,7 +109,7 @@ Configuration lives in three places, by design:
 | Where | What | Who edits it |
 |---|---|---|
 | `deploy.env` (host file, gitignored) | Deployment/security/infra: `APP_DOMAIN`, TLS, session length, HSTS, brute-force limits, Cloudflare Access `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | operator, at deploy time |
-| Django admin → **App Settings** (superuser) | `ENTSOE_API_KEY`, `SHELLY_STOP_REST_DEBUG`, `CLEAR_LOGS_ON_STARTUP` | superuser, in the UI |
+| Django admin → **App Settings** (superuser) | `ENTSOE_API_KEY`, `SHELLY_STOP_REST_DEBUG`, `CLEAR_LOGS_ON_STARTUP`, `LOG_RETENTION_DAYS` (default 14; an hourly job deletes older device logs) | superuser, in the UI |
 | In-app **Settings** page / admin | Per-device settings & credentials (run hours, block scheduling, prices, Shelly/Tuya keys, thermostat, night fallback) | device owner (own devices) or superuser (all) |
 
 Security/TLS/SSO settings are deliberately **not** editable from the web UI — see
