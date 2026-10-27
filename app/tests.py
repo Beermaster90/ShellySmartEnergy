@@ -1012,6 +1012,19 @@ class CloudflareAccessSSOTest(TestCase):
             )
         self.assertFalse(resp.wsgi_request.user.is_authenticated)
 
+    def test_unreachable_certs_logs_team_domain_hint(self):
+        # A stale team domain makes the certs URL 404; that must fail closed and
+        # log a message pointing at CF_ACCESS_TEAM_DOMAIN, not just "HTTP 404".
+        import jwt
+        from unittest.mock import patch
+        from app.cf_access import verify_access_jwt
+        err = jwt.PyJWKClientConnectionError("HTTP Error 404: Not Found")
+        with self.settings(CF_ACCESS_TEAM_DOMAIN=self.team, CF_ACCESS_AUD=self.aud), \
+             patch("app.cf_access._get_signing_key", side_effect=err), \
+             self.assertLogs("app.cf_access", level="ERROR") as logs:
+            self.assertIsNone(verify_access_jwt(self._make_token()))
+        self.assertIn("CF_ACCESS_TEAM_DOMAIN", logs.output[0])
+
 
 class DeviceSettingsAccessTest(TestCase):
     """Owners edit their own devices in-app; they cannot touch others' or the admin."""

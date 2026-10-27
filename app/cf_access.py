@@ -76,6 +76,18 @@ def verify_access_jwt(token: str) -> dict | None:
         # Wrong audience, bad signature, expired, etc. — treat as unauthenticated.
         logger.warning("Cloudflare Access token rejected: %s", exc)
         return None
-    except Exception as exc:  # network / JWKS fetch failures
+    except jwt.PyJWKClientConnectionError as exc:
+        # The usual cause is a stale CF_ACCESS_TEAM_DOMAIN: renaming/recreating
+        # the Zero Trust team changes it, and the old certs URL then 404s. SSO
+        # quietly falls back to the password form, so say so plainly.
+        logger.error(
+            "Cloudflare Access verification error: cannot fetch signing keys from "
+            "%s (%s). Check CF_ACCESS_TEAM_DOMAIN in deploy.env matches the team "
+            "domain Access redirects to.",
+            _certs_url(),
+            exc,
+        )
+        return None
+    except Exception as exc:  # other network / JWKS failures
         logger.error("Cloudflare Access verification error: %s", exc)
         return None

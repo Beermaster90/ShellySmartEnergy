@@ -214,6 +214,23 @@ The app needs two values so it can cryptographically verify Access tokens:
 Put both in `deploy.env` and redeploy. With them set, the SSO middleware activates
 (it self-disables when they're blank).
 
+**If SSO stops working** (Access login works but the app shows its own login
+form): check the app logs for `Cloudflare Access`.
+
+```bash
+docker logs django-shelly-prod 2>&1 | grep -i "cloudflare access" | tail
+```
+
+- `cannot fetch signing keys ... 404` — `CF_ACCESS_TEAM_DOMAIN` is stale. The
+  team domain changes if the Zero Trust team is renamed or recreated (it has
+  happened here: `energypilot-team` became `silent-fog-7f40`). Find the current
+  one from where Access redirects, then update `deploy.env` and redeploy:
+  `curl -sI https://<APP_DOMAIN>/ | grep -i location`
+- `token rejected: Invalid audience` — the Access app was recreated; copy its new
+  AUD tag into `CF_ACCESS_AUD`.
+- `has no matching Django account` — the Access email doesn't match any user's
+  email (see 4e).
+
 ### 4e. How Access identities map to app users
 
 The app verifies the token, reads the authenticated **email**, and matches it to
@@ -243,6 +260,22 @@ invalidates the old token everywhere at once.
    and passes it via `TUNNEL_TOKEN` so it stays out of the container's arg list.
 
 After rotation, any leaked copy of the old token is worthless.
+
+## 4g. Updating the tunnel connector
+
+The connector runs with `--no-autoupdate`, so it stays on the image it was
+created from — a restart does **not** update it. To update:
+
+```bash
+./update-cloudflared.sh
+```
+
+It pulls `cloudflare/cloudflared:latest` (override with `CLOUDFLARED_IMAGE`),
+recreates the container using the token saved in `data/.cloudflared_token`, and
+waits for "Registered tunnel connection". If the new version doesn't register,
+it rolls back to the previous image automatically; on success it removes only
+the old cloudflared image. The tunnel is down for a few seconds. If the token
+file doesn't exist yet, run `./rotate-tunnel-token.sh` once to create it.
 
 ## 5. Verify
 

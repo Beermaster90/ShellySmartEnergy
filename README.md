@@ -62,6 +62,8 @@ podman-prod.sh           build & run rootless with Podman (hardened)
 deploy-common.sh         shared deploy config, reads deploy.env
 deploy.env.example       template for deploy config (copy to deploy.env)
 cloudflared/             Cloudflare Tunnel config example (locally-managed tunnels)
+rotate-tunnel-token.sh   rotate the tunnel token and restart the connector
+update-cloudflared.sh    update the tunnel connector image (auto-rollback on failure)
 DEPLOYMENT.md            full secure deployment: Tunnel, Access, Google SSO, hardening
 ```
 

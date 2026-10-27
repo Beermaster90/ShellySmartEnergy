@@ -20,15 +20,15 @@ tzlocal==5.3.1            # APScheduler dependency
 # --- Electricity prices ---
 entsoe-py==0.6.2
 beautifulsoup4==4.14.3    # entsoe-py dependency
-soupsieve==2.8.4          # patched (ReDoS fixes over 2.8.1)
+soupsieve==2.9.0          # patched (selector ReDoS fixes over 2.8.4)
 pandas==2.1.4
 numpy==1.26.4
 
 # --- HTTP stack ---
-requests==2.32.5
-urllib3==2.7.0            # patched (decompression-bomb / proxy-redirect fixes over 2.6.2)
-idna==3.11
-certifi==2026.1.4
+requests==2.33.0
+urllib3==2.8.0            # patched (chunked-streaming memory + proxy TLS fixes over 2.7.0)
+idna==3.15                # CVE-2026-45409 (complete fix for CVE-2024-3651 DoS)
+certifi==2026.10.19       # drops the compromised emSign ECC Root CA - G3
 charset-normalizer==3.4.4
 
 # --- Shared runtime deps ---
@@ -46,5 +46,5 @@ packaging==25.0
 #   python-crontab prompt_toolkit wcwidth bs4 (dummy shim) pip
 
 # --- Cloudflare Access SSO ---
-PyJWT==2.13.0             # verify Access identity tokens
-cryptography==49.0.0      # RS256 signature verification (PyJWT[crypto])
+PyJWT==2.15.0             # verify Access identity tokens; 2.15 fixes JWKS-client + alg-confusion advisories
+cryptography==50.0.0      # RS256 signature verification (PyJWT[crypto])
