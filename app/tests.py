@@ -1618,6 +1618,16 @@ class EVAlwaysOnSlotSettingsTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(self.charger.always_on_slots.exists())
 
+    def test_slot_count_is_capped(self):
+        self.client.force_login(self.owner)
+        extra = {}
+        for i in range(25):
+            extra[f"always_on_slots-{i}-start_time"] = "06:00"
+            extra[f"always_on_slots-{i}-duration_hours"] = "1"
+        resp = self._post(extra, total=25)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(self.charger.always_on_slots.exists())
+
     def test_other_user_cannot_edit_slots(self):
         self.client.force_login(self.other)
         resp = self._post({

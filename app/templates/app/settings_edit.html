@@ -32,6 +32,12 @@
                 heat the battery and cabin before leaving for work. Untick a slot to pause it.
                 Times are 24 h, in your own timezone.
             </p>
+            <style>
+                .slot-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+                /* An inline/class display would otherwise override [hidden] and leave
+                   a row marked for deletion still on screen. */
+                .slot-row[hidden] { display: none; }
+            </style>
             {{ formset.management_form }}
             {% if formset.non_form_errors %}
                 <div class="alert alert-danger">{{ formset.non_form_errors }}</div>
