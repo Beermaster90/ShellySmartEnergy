@@ -33,6 +33,13 @@ Cloudflare Access single sign-on.
   - *Force Device Off* — keeps the device off until released.
 - **EV charger** (Tuya) — schedules charging on cheap hours, with a reduced-current
   mode to protect fuses when other high-power devices run.
+  - *Always-on time slots* (Settings → EV charger) — any number of daily windows
+    (24 h start time in 15-minute steps, run 1 or 2 hours) when the charger runs
+    regardless of price, e.g. so the car can heat its battery and cabin before
+    the morning commute. Each slot can be ticked on/off. Nothing is booked ahead:
+    the period is recorded (marked *forced* on the dashboard) only when its time
+    comes, so disabling or removing a slot needs no clean-up. It still only
+    starts when a car is plugged in, and doesn't run while automation is disabled.
 - Stored credentials (Shelly / Tuya / ENTSO-E keys) are **encrypted at rest**.
 
 ---
@@ -112,7 +119,7 @@ Configuration lives in three places, by design:
 |---|---|---|
 | `deploy.env` (host file, gitignored) | Deployment/security/infra: `APP_DOMAIN`, TLS, session length, HSTS, brute-force limits, Cloudflare Access `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | operator, at deploy time |
 | Django admin → **App Settings** (superuser) | `ENTSOE_API_KEY`, `SHELLY_STOP_REST_DEBUG`, `CLEAR_LOGS_ON_STARTUP`, `LOG_RETENTION_DAYS` (default 14; an hourly job deletes older device logs) | superuser, in the UI |
-| In-app **Settings** page / admin | Per-device settings & credentials (run hours, block scheduling, prices, Shelly/Tuya keys, thermostat, night fallback) | device owner (own devices) or superuser (all) |
+| In-app **Settings** page / admin | Per-device settings & credentials (run hours, block scheduling, prices, Shelly/Tuya keys, thermostat, night fallback, EV always-on slots) | device owner (own devices) or superuser (all) |
 
 Security/TLS/SSO settings are deliberately **not** editable from the web UI — see
 DEPLOYMENT.md for why (a compromised admin session must not be able to weaken

@@ -24,8 +24,67 @@
                 {% endif %}
             </div>
         {% endfor %}
+
+        {% if formset %}
+            <h3 style="margin-top: 24px;">Always-on time slots</h3>
+            <p class="text-muted">
+                The charger runs every day in these windows regardless of price — e.g. to
+                heat the battery and cabin before leaving for work. Untick a slot to pause it.
+                Times are 24 h, in your own timezone.
+            </p>
+            {{ formset.management_form }}
+            {% if formset.non_form_errors %}
+                <div class="alert alert-danger">{{ formset.non_form_errors }}</div>
+            {% endif %}
+            <div id="slot-rows">
+                {% for slot in formset %}
+                    {% include "app/_always_on_slot_row.html" with slot=slot %}
+                {% endfor %}
+            </div>
+            <button type="button" class="btn btn-default" id="slot-add" style="margin-bottom: 16px;">+ Add time slot</button>
+            <template id="slot-template">
+                {% include "app/_always_on_slot_row.html" with slot=formset.empty_form %}
+            </template>
+        {% endif %}
+
+        <div>
         <button type="submit" class="btn btn-primary">Save</button>
         <a href="{% url 'settings_home' %}" class="btn btn-default">Cancel</a>
+        </div>
     </form>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{% if formset %}
+<script>
+(function () {
+    var prefix = "{{ formset.prefix }}";
+    var rows = document.getElementById("slot-rows");
+    var total = document.getElementById("id_" + prefix + "-TOTAL_FORMS");
+    var maxForms = parseInt(document.getElementById("id_" + prefix + "-MAX_NUM_FORMS").value, 10);
+
+    function visibleCount() {
+        return rows.querySelectorAll(".slot-row:not([hidden])").length;
+    }
+
+    document.getElementById("slot-add").addEventListener("click", function () {
+        if (visibleCount() >= maxForms) return;
+        var index = parseInt(total.value, 10);
+        var html = document.getElementById("slot-template").innerHTML.replace(/__prefix__/g, index);
+        rows.insertAdjacentHTML("beforeend", html);
+        total.value = index + 1;
+    });
+
+    // "−" ticks the row's hidden DELETE box and hides it: Django then deletes a
+    // saved slot and ignores a new one. Row indexes stay intact this way.
+    rows.addEventListener("click", function (e) {
+        if (!e.target.classList.contains("slot-remove")) return;
+        var row = e.target.closest(".slot-row");
+        row.querySelector("input[name$='-DELETE']").checked = true;
+        row.hidden = true;
+    });
+})();
+</script>
+{% endif %}
 {% endblock %}

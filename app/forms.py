@@ -7,7 +7,9 @@ from django.conf import settings
 from django.contrib.auth.forms import AuthenticationForm
 from django.utils.translation import gettext_lazy as _
 
-from app.models import ShellyDevice, ShellyTemperature, EVCharger
+from datetime import datetime
+
+from app.models import ShellyDevice, ShellyTemperature, EVCharger, EVChargerAlwaysOnSlot
 
 
 class _BootstrapModelForm(forms.ModelForm):
@@ -110,6 +112,45 @@ class EVChargerSettingsForm(_BootstrapModelForm):
         widgets = {
             "status": forms.Select(choices=[(1, "Enabled"), (0, "Disabled")]),
         }
+
+
+# A fixed 24 h list in 15-minute steps (the scheduler's resolution). A plain
+# <input type="time"> would show AM/PM in some browser locales.
+_QUARTER_HOURS = [(f"{h:02d}:{m:02d}", f"{h:02d}:{m:02d}") for h in range(24) for m in (0, 15, 30, 45)]
+
+
+class EVChargerAlwaysOnSlotForm(_BootstrapModelForm):
+    start_time = forms.TypedChoiceField(
+        choices=_QUARTER_HOURS,
+        coerce=lambda s: datetime.strptime(s, "%H:%M").time(),
+        label="Start",
+    )
+
+    class Meta:
+        model = EVChargerAlwaysOnSlot
+        fields = ["enabled", "start_time", "duration_hours"]
+        labels = {"duration_hours": "Run for"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.initial["start_time"] = self.instance.start_time.strftime("%H:%M")
+
+
+# Slots are always bound to the charger being edited (inline formset sets the
+# FK), so a client can't attach one to someone else's charger. max_num keeps a
+# crafted POST from creating an unbounded number of rows.
+EVChargerAlwaysOnSlotFormSet = forms.inlineformset_factory(
+    EVCharger,
+    EVChargerAlwaysOnSlot,
+    form=EVChargerAlwaysOnSlotForm,
+    extra=0,
+    can_delete=True,
+    max_num=24,
+    validate_max=True,
+    absolute_max=24,
+)
+
 
 class BootstrapAuthenticationForm(AuthenticationForm):
     """Authentication form which uses boostrap CSS."""

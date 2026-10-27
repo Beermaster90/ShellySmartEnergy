@@ -185,6 +185,8 @@ def get_common_context(request: HttpRequest) -> Dict[str, Any]:
         price_id = ev_assignment.electricity_price.id
         charger_key = f"ev_{ev_assignment.charger.id}"
         assigned_devices_map.setdefault(price_id, []).append(charger_key)
+        if ev_assignment.assignment_type == "always_on":
+            forced_devices_map.setdefault(price_id, []).append(charger_key)
 
     for price in prices:
         price["assigned_devices"] = ",".join(assigned_devices_map.get(price["id"], []))
@@ -866,6 +868,7 @@ from app.forms import (
     ShellyDeviceSettingsForm,
     ShellyTemperatureSettingsForm,
     EVChargerSettingsForm,
+    EVChargerAlwaysOnSlotFormSet,
 )
 
 
@@ -890,37 +893,46 @@ def settings_home(request: HttpRequest):
     return render(request, "app/settings.html", context)
 
 
-def _edit_object(request, model, form_class, pk, label):
-    """Shared edit flow: load an owned object, bind the form, save on POST."""
+def _edit_object(request, model, form_class, pk, label, formset_class=None):
+    """Shared edit flow: load an owned object, bind the form, save on POST.
+
+    ``formset_class`` is an optional inline formset of child rows (e.g. EV
+    always-on slots) saved together with the object.
+    """
     obj = get_object_or_404(_owned_queryset(model, request), pk=pk)
-    if request.method == "POST":
-        form = form_class(request.POST, instance=obj, user=obj.user)
-        if form.is_valid():
-            form.save()
-            messages.success(request, f"{label} “{obj}” saved.")
-            return redirect("settings_home")
-    else:
-        form = form_class(instance=obj, user=obj.user)
+    data = request.POST if request.method == "POST" else None
+    form = form_class(data, instance=obj, user=obj.user)
+    formset = formset_class(data, instance=obj) if formset_class else None
+    if data is not None and form.is_valid() and (formset is None or formset.is_valid()):
+        form.save()
+        if formset is not None:
+            formset.save()
+        messages.success(request, f"{label} “{obj}” saved.")
+        return redirect("settings_home")
     context = get_common_context(request)
-    context.update({"title": f"Edit {label}", "form": form, "heading": f"Edit {label}", "object_name": str(obj)})
+    context.update({"title": f"Edit {label}", "form": form, "formset": formset,
+                    "heading": f"Edit {label}", "object_name": str(obj)})
     return render(request, "app/settings_edit.html", context)
 
 
-def _add_object(request, form_class, label):
+def _add_object(request, form_class, label, formset_class=None):
     """Shared create flow: bind the form and force ownership to the requester."""
-    if request.method == "POST":
-        form = form_class(request.POST, user=request.user)
-        if form.is_valid():
-            obj = form.save(commit=False)
-            obj.user = request.user  # owner is always the creator, never client-supplied
-            obj.save()
-            form.save_m2m()
-            messages.success(request, f"{label} “{obj}” created.")
-            return redirect("settings_home")
-    else:
-        form = form_class(user=request.user)
+    data = request.POST if request.method == "POST" else None
+    form = form_class(data, user=request.user)
+    formset = formset_class(data, instance=form.instance) if formset_class else None
+    if data is not None and form.is_valid() and (formset is None or formset.is_valid()):
+        obj = form.save(commit=False)
+        obj.user = request.user  # owner is always the creator, never client-supplied
+        obj.save()
+        form.save_m2m()
+        if formset is not None:
+            formset.instance = obj
+            formset.save()
+        messages.success(request, f"{label} “{obj}” created.")
+        return redirect("settings_home")
     context = get_common_context(request)
-    context.update({"title": f"Add {label}", "form": form, "heading": f"Add {label}", "object_name": ""})
+    context.update({"title": f"Add {label}", "form": form, "formset": formset,
+                    "heading": f"Add {label}", "object_name": ""})
     return render(request, "app/settings_edit.html", context)
 
 
@@ -936,7 +948,8 @@ def settings_thermostat(request: HttpRequest, pk: int):
 
 @login_required
 def settings_charger(request: HttpRequest, pk: int):
-    return _edit_object(request, EVCharger, EVChargerSettingsForm, pk, "EV charger")
+    return _edit_object(request, EVCharger, EVChargerSettingsForm, pk, "EV charger",
+                        formset_class=EVChargerAlwaysOnSlotFormSet)
 
 
 @login_required
@@ -951,4 +964,5 @@ def settings_add_thermostat(request: HttpRequest):
 
 @login_required
 def settings_add_charger(request: HttpRequest):
-    return _add_object(request, EVChargerSettingsForm, "EV charger")
+    return _add_object(request, EVChargerSettingsForm, "EV charger",
+                       formset_class=EVChargerAlwaysOnSlotFormSet)

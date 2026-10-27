@@ -394,11 +394,44 @@ class EVCharger(models.Model):
         verbose_name_plural = "EV Chargers"
 
 
+class EVChargerAlwaysOnSlot(models.Model):
+    """A daily time window in which the charger always runs, whatever the price.
+
+    Meant for pre-conditioning: the car heats its battery and cabin from the
+    grid before people leave for work. Nothing is booked ahead — the 15-minute
+    control job checks the slot when its time comes and only then records the
+    period (as an "always_on" assignment). Disabling or deleting a slot
+    therefore needs no clean-up of future bookings.
+    """
+
+    DURATION_CHOICES = [(1, "1 hour"), (2, "2 hours")]
+
+    charger = models.ForeignKey(EVCharger, on_delete=models.CASCADE, related_name="always_on_slots")
+    start_time = models.TimeField(help_text="Local time the slot starts (24 h)")
+    duration_hours = models.IntegerField(choices=DURATION_CHOICES, default=1)
+    enabled = models.BooleanField(default=True)
+
+    def covers(self, local_dt) -> bool:
+        """True if the local datetime falls inside this slot (wraps past midnight)."""
+        start = self.start_time.hour * 60 + self.start_time.minute
+        now = local_dt.hour * 60 + local_dt.minute
+        return (now - start) % (24 * 60) < self.duration_hours * 60
+
+    def __str__(self):
+        return f"{self.charger.familiar_name} {self.start_time:%H:%M} +{self.duration_hours} h"
+
+    class Meta:
+        ordering = ["start_time"]
+        verbose_name = "EV Charger Always-On Slot"
+        verbose_name_plural = "EV Charger Always-On Slots"
+
+
 class EVChargerAssignment(models.Model):
     ASSIGNMENT_TYPES = [
         ("cheapest", "Cheapest Hours"),
         ("threshold", "Price Threshold"),
         ("manual", "Manual"),
+        ("always_on", "Always-On Slot"),
     ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)

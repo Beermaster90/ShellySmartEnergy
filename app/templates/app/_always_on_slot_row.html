@@ -1,0 +1,13 @@
+{# One always-on slot row; also rendered from formset.empty_form as the "+" template. #}
+<div class="slot-row" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px;"
+     {% if slot.DELETE.value %}hidden{% endif %}>
+    {{ slot.id }}
+    <label style="margin: 0; font-weight: normal;">{{ slot.enabled }} On</label>
+    <span>{{ slot.start_time.label }}</span>
+    <span style="width: 100px;">{{ slot.start_time }}</span>
+    <span>{{ slot.duration_hours.label }}</span>
+    <span style="width: 110px;">{{ slot.duration_hours }}</span>
+    <span hidden>{{ slot.DELETE }}</span>
+    <button type="button" class="btn btn-default slot-remove" title="Remove slot">−</button>
+    {% if slot.errors %}<div class="text-danger" style="flex-basis: 100%;">{{ slot.errors }}</div>{% endif %}
+</div>

@@ -529,6 +529,12 @@ class DeviceController:
             log_device_event(None, f"Error in control_ev_chargers: {e}", "ERROR")
 
     @staticmethod
+    def _in_always_on_slot(charger: EVCharger, start_time) -> bool:
+        """True if an enabled always-on slot covers this period (in the owner's local time)."""
+        local = start_time.astimezone(TimeUtils.get_user_timezone(charger.user))
+        return any(slot.covers(local) for slot in charger.always_on_slots.filter(enabled=True))
+
+    @staticmethod
     def _process_single_ev_charger(charger: EVCharger, active_price_ids: list, start_time) -> None:
         """Control one EV charger for the current 15-minute period."""
         from app.services.ev_charger_factory import get_ev_charger_service
@@ -626,6 +632,20 @@ class DeviceController:
         # Do not attempt start_charging if the car is not plugged in.
         CAR_CONNECTED_STATES = {"charger_insert", "charger_charging", "charger_pause", "charger_end"}
         car_connected = status.work_state in CAR_CONNECTED_STATES
+
+        # Always-on slot (e.g. pre-heat before work): run regardless of price.
+        # The period is recorded only now that it has come, never booked ahead,
+        # so a slot disabled later leaves nothing behind to clean up.
+        if not assigned and DeviceController._in_always_on_slot(charger, start_time):
+            assigned = True
+            if active_price_ids:
+                EVChargerAssignment.objects.get_or_create(
+                    user=charger.user,
+                    charger=charger,
+                    electricity_price_id=active_price_ids[0],
+                    defaults={"assignment_type": "always_on"},
+                )
+            log_ev_event(charger, "Always-on slot active — charging regardless of price", "INFO")
 
         # No price data (e.g. ENTSO-E outage) and a car is plugged in → night
         # fallback so the charger still reaches its daily target. Guarded on

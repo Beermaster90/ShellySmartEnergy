@@ -11,6 +11,7 @@ from .models import (
     UserProfile,
     EVCharger,
     EVChargerAssignment,
+    EVChargerAlwaysOnSlot,
 )
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from app.utils.time_utils import TimeUtils
@@ -501,7 +502,13 @@ admin.site.register(AppSetting, AppSettingAdmin)
 
 
 ### EV CHARGER ADMIN ###
+class EVChargerAlwaysOnSlotInline(admin.TabularInline):
+    model = EVChargerAlwaysOnSlot
+    extra = 0
+
+
 class EVChargerAdmin(admin.ModelAdmin):
+    inlines = [EVChargerAlwaysOnSlotInline]
     list_display = (
         "id",
         "familiar_name",

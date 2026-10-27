@@ -19,6 +19,7 @@ from app.models import (
     DeviceLog,
     ElectricityPrice,
     EVCharger,
+    EVChargerAlwaysOnSlot,
     EVChargerAssignment,
     ShellyDevice,
     ShellyTemperature,
@@ -1154,9 +1155,15 @@ class DeviceSettingsAddTest(TestCase):
             "night_transfer_price": "1.0", "auto_assign_price_threshold": "0",
             "tuya_client_id": "", "tuya_client_secret": "", "tuya_device_id": "",
             "tuya_base_url": "https://openapi.tuyaeu.com",
+            # A slot added on the create page is saved with the new charger.
+            "always_on_slots-TOTAL_FORMS": "1", "always_on_slots-INITIAL_FORMS": "0",
+            "always_on_slots-0-enabled": "on", "always_on_slots-0-start_time": "06:00",
+            "always_on_slots-0-duration_hours": "1",
         })
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(EVCharger.objects.get(familiar_name="New Charger").user, self.eero)
+        charger = EVCharger.objects.get(familiar_name="New Charger")
+        self.assertEqual(charger.user, self.eero)
+        self.assertEqual(charger.always_on_slots.count(), 1)
 
     def test_add_requires_login(self):
         self.client.logout()
@@ -1479,3 +1486,143 @@ class LogRetentionTest(TestCase):
             DeviceController.prune_old_logs()
 
         self.assertTrue(DeviceLog.objects.filter(id=log.id).exists())
+
+
+class EVAlwaysOnSlotTest(TestCase):
+    """Always-on slots run the charger regardless of price, recorded only when due."""
+
+    def setUp(self):
+        from datetime import time
+        from app.tasks import DeviceController
+        self.DeviceController = DeviceController
+        self.user = User.objects.create_user("ev-slot-user")
+        self.charger = EVCharger.objects.create(
+            familiar_name="Laturi", user=self.user, status=1, run_hours_per_day=0,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+        # 06:00 Helsinki for 1 h = 04:00-05:00 UTC in January.
+        self.slot = EVChargerAlwaysOnSlot.objects.create(
+            charger=self.charger, start_time=time(6, 0), duration_hours=1,
+        )
+
+    def at(self, hour, minute=0):
+        return datetime(2026, 1, 15, hour, minute, tzinfo=UTC)
+
+    def test_covers_window_and_midnight_wrap(self):
+        from datetime import time
+        slot = EVChargerAlwaysOnSlot(start_time=time(23, 30), duration_hours=2)
+        self.assertTrue(slot.covers(datetime(2026, 1, 1, 23, 30)))
+        self.assertTrue(slot.covers(datetime(2026, 1, 2, 1, 15)))
+        self.assertFalse(slot.covers(datetime(2026, 1, 2, 1, 30)))
+        self.assertFalse(slot.covers(datetime(2026, 1, 1, 23, 15)))
+
+    def test_in_slot_uses_owner_local_time(self):
+        self.assertTrue(self.DeviceController._in_always_on_slot(self.charger, self.at(4, 0)))
+        self.assertTrue(self.DeviceController._in_always_on_slot(self.charger, self.at(4, 45)))
+        self.assertFalse(self.DeviceController._in_always_on_slot(self.charger, self.at(5, 0)))
+        self.assertFalse(self.DeviceController._in_always_on_slot(self.charger, self.at(6, 0)))
+
+    def test_disabled_slot_is_ignored(self):
+        self.slot.enabled = False
+        self.slot.save()
+        self.assertFalse(self.DeviceController._in_always_on_slot(self.charger, self.at(4, 0)))
+
+    def _run_period(self, start):
+        price = ElectricityPrice.objects.create(
+            start_time=start, end_time=start + timedelta(minutes=15), price_kwh=Decimal("50"),
+        )
+        service = Mock()
+        service.get_status.return_value = Mock(
+            is_charging=False, work_state="charger_insert", connection_state="online",
+            power_w=0, temp_c=10, session_energy_kwh=0, total_energy_kwh=0,
+        )
+        service.start_charging.return_value = True
+        with patch("app.services.ev_charger_factory.get_ev_charger_service", return_value=service):
+            self.DeviceController._process_single_ev_charger(self.charger, [price.id], start)
+        return service, price
+
+    def test_starts_charging_and_records_period_when_due(self):
+        service, price = self._run_period(self.at(4, 15))
+        service.start_charging.assert_called_once()
+        a = EVChargerAssignment.objects.get(charger=self.charger, electricity_price=price)
+        self.assertEqual(a.assignment_type, "always_on")
+
+    def test_nothing_outside_slot(self):
+        service, _ = self._run_period(self.at(8, 0))
+        service.start_charging.assert_not_called()
+        self.assertFalse(EVChargerAssignment.objects.filter(charger=self.charger).exists())
+
+
+class EVAlwaysOnSlotSettingsTest(TestCase):
+    """Slots are edited on the charger settings page, scoped to the owner."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user("slot-owner", password="Opw!12345")
+        self.other = User.objects.create_user("slot-other", password="Xpw!12345")
+        self.charger = EVCharger.objects.create(
+            familiar_name="Laturi", user=self.owner, status=1,
+            day_transfer_price=Decimal("1.0"), night_transfer_price=Decimal("1.0"),
+        )
+        self.url = f"/shellyapp/settings/charger/{self.charger.pk}/"
+
+    def _post(self, extra, total, initial=0):
+        data = {
+            "familiar_name": "Laturi", "status": "1",
+            "charge_current_a": "6", "charge_current_reduced_a": "3",
+            "run_hours_per_day": "0", "switch_on_cost": "1.0",
+            "min_run_block_minutes": "30",
+            "day_transfer_price": "1.0", "night_transfer_price": "1.0",
+            "auto_assign_price_threshold": "0",
+            "tuya_base_url": "https://openapi.tuyaeu.com",
+            "always_on_slots-TOTAL_FORMS": str(total),
+            "always_on_slots-INITIAL_FORMS": str(initial),
+            "always_on_slots-MIN_NUM_FORMS": "0",
+            "always_on_slots-MAX_NUM_FORMS": "24",
+        }
+        data.update(extra)
+        return self.client.post(self.url, data)
+
+    def test_owner_adds_and_removes_slots(self):
+        self.client.force_login(self.owner)
+        resp = self._post({
+            "always_on_slots-0-enabled": "on",
+            "always_on_slots-0-start_time": "06:30",
+            "always_on_slots-0-duration_hours": "2",
+            "always_on_slots-1-start_time": "07:00",
+            "always_on_slots-1-duration_hours": "1",
+        }, total=2)
+        self.assertEqual(resp.status_code, 302)
+        slots = list(self.charger.always_on_slots.all())
+        self.assertEqual([(s.start_time.strftime("%H:%M"), s.duration_hours, s.enabled) for s in slots],
+                         [("06:30", 2, True), ("07:00", 1, False)])
+
+        # The edit page renders the saved time back in the 24 h select.
+        self.assertContains(self.client.get(self.url), 'value="06:30" selected')
+
+        first = slots[0]
+        resp = self._post({
+            "always_on_slots-0-id": str(first.pk),
+            "always_on_slots-0-start_time": "06:30",
+            "always_on_slots-0-duration_hours": "2",
+            "always_on_slots-0-DELETE": "on",
+        }, total=1, initial=1)
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(EVChargerAlwaysOnSlot.objects.filter(pk=first.pk).exists())
+
+    def test_rejects_off_grid_time_and_bad_duration(self):
+        self.client.force_login(self.owner)
+        resp = self._post({
+            "always_on_slots-0-start_time": "06:10",
+            "always_on_slots-0-duration_hours": "5",
+        }, total=1)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(self.charger.always_on_slots.exists())
+
+    def test_other_user_cannot_edit_slots(self):
+        self.client.force_login(self.other)
+        resp = self._post({
+            "always_on_slots-0-start_time": "06:00",
+            "always_on_slots-0-duration_hours": "1",
+        }, total=1)
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(EVChargerAlwaysOnSlot.objects.exists())
